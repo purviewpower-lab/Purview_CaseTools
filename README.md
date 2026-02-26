@@ -1,4 +1,3 @@
-Purview Case Tools
-A GUI utilising WPF (Windows Presentation Framework), Powershell and REST API to automate and administer many commons MS Purview eDiscovery tasks.
-Execute by navigating to the .ps1 and running the script with .\ (fullstop backslash). 
-For background see - https://purviewpower.wordpress.com
+**Purview Case Tools**
+
+A streamlined GUI application built with WPF (Windows Presentation Foundation), PowerShell, and the Microsoft Purview REST API to simplify and automate common Microsoft Purview eDiscovery administrative tasks.
