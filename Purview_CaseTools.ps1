@@ -10,35 +10,79 @@ $logDir = 'C:\PurviewCaseToolLogs'
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 $logFile = Join-Path $logDir ("PurviewTools_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 
-Function Write-Log {
-    param([string]$Message, [string]$Level = 'INFO')
-    $line = "[{0}] [{1}] {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
-    $line | Tee-Object -FilePath $logFile -Append | Out-Null
-}
+# State shared between the UI thread and the background worker runspace
+$OutQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
+$Shared   = [hashtable]::Synchronized(@{ IsConnected = $false })
 
-Function Ensure-Modules {
-    if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
-        Write-Log "ExchangeOnlineManagement not found; attempting install..." "WARN"
-        Install-Module ExchangeOnlineManagement -Scope AllUsers -Force -ErrorAction Stop
+# Functions used by the actions. They are loaded here and into the worker runspace,
+# where every Security & Compliance cmdlet runs so the window stays responsive.
+$WorkerFunctions = {
+    Function Write-Log {
+        param([string]$Message, [string]$Level = 'INFO')
+        $line = "[{0}] [{1}] {2}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+        $line | Tee-Object -FilePath $logFile -Append | Out-Null
     }
-}
 
-$global:IsConnected = $false
-Function Connect-Compliance {
-    if ($global:IsConnected) { return }
-    Ensure-Modules
-    Import-Module ExchangeOnlineManagement -ErrorAction Stop
-    Write-Log "Connecting to Security & Compliance (IPPS Session)..."
-    try {
-        Connect-IPPSSession -ErrorAction Stop | Out-Null
-        $global:IsConnected = $true
-        Write-Log "Connected."
+    # Log a line and queue it for the active tab's output box
+    Function Write-Out {
+        param([string]$Message, [string]$Level = 'INFO')
+        Write-Log $Message $Level
+        $OutQueue.Enqueue($Message)
     }
-    catch {
-        Write-Log ("Failed to connect: {0}" -f $_.Exception.Message) "ERROR"
-        throw
+
+    Function Ensure-Modules {
+        if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+            Write-Log "ExchangeOnlineManagement not found; attempting install..." "WARN"
+            Install-Module ExchangeOnlineManagement -Scope AllUsers -Force -ErrorAction Stop
+        }
+    }
+
+    Function Connect-Compliance {
+        if ($Shared.IsConnected) { return }
+        Ensure-Modules
+        Import-Module ExchangeOnlineManagement -ErrorAction Stop
+        Write-Log "Connecting to Security & Compliance (IPPS Session)..."
+        try {
+            Connect-IPPSSession -ErrorAction Stop | Out-Null
+            $Shared.IsConnected = $true
+            Write-Log "Connected."
+        }
+        catch {
+            Write-Log ("Failed to connect: {0}" -f $_.Exception.Message) "ERROR"
+            throw
+        }
+    }
+
+    Function Get-CaseMemberEmails {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory=$true)][string]$Case,
+            [string]$ExcludeEmail
+        )
+
+        try {
+            $members = Get-ComplianceCaseMember -Case $Case -ErrorAction Stop
+
+            $emails = $members | ForEach-Object {
+                $addr = $_.PrimarySmtpAddress
+                if ([string]::IsNullOrWhiteSpace($addr)) { $addr = $_.Name }
+                if ($addr) { $addr.Trim() }
+            } | Where-Object { $_ } | Select-Object -Unique
+
+            if ($ExcludeEmail) {
+                $emails = $emails | Where-Object { $_ -ine $ExcludeEmail }
+            }
+
+            return $emails
+        }
+        catch {
+            $msg = "Failed to get members for case '$Case': $($_.Exception.Message)"
+            Write-Log $msg 'ERROR'
+            throw $msg
+        }
     }
 }
+. $WorkerFunctions
 
 Function Parse-Emails {
     param([string]$EmailsMultiline)
@@ -54,35 +98,6 @@ Function Parse-Cases {
         ForEach-Object { $_.Trim() } |
         Where-Object { $_ } |
         Select-Object -Unique
-}
-
-Function Get-CaseMemberEmails {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory=$true)][string]$Case,
-        [string]$ExcludeEmail
-    )
-
-    try {
-        $members = Get-ComplianceCaseMember -Case $Case -ErrorAction Stop
-
-        $emails = $members | ForEach-Object {
-            $addr = $_.PrimarySmtpAddress
-            if ([string]::IsNullOrWhiteSpace($addr)) { $addr = $_.Name }
-            if ($addr) { $addr.Trim() }
-        } | Where-Object { $_ } | Select-Object -Unique
-
-        if ($ExcludeEmail) {
-            $emails = $emails | Where-Object { $_ -ine $ExcludeEmail }
-        }
-
-        return $emails
-    }
-    catch {
-        $msg = "Failed to get members for case '$Case': $($_.Exception.Message)"
-        Write-Log $msg 'ERROR'
-        throw $msg
-    }
 }
 
 # ------------------ WPF UI ------------------
@@ -319,6 +334,93 @@ Function Set-UIBusy([bool]$busy) {
     )
     foreach ($c in $controls) { if ($c) { $c.IsEnabled = -not $busy } }
 }
+Function Update-ConnectionText {
+    if ($Shared.IsConnected) {
+        $TxtConn.Text = 'Connected to Security & Compliance'
+        $TxtConn.Foreground = 'Green'
+    } else {
+        $TxtConn.Text = 'Not connected'
+        $TxtConn.ClearValue([System.Windows.Controls.TextBlock]::ForegroundProperty)
+    }
+}
+
+# ------------------ Background worker ------------------
+# One long-lived runspace owns the IPPS connection and runs all cmdlets. The UI thread only
+# reads inputs, starts an action, and appends queued output while the action runs.
+$Worker = [runspacefactory]::CreateRunspace($Host)   # share the console host so module warnings still show there
+$Worker.ApartmentState = 'STA'          # interactive sign-in needs an STA thread
+$Worker.ThreadOptions  = 'ReuseThread'  # keep the connection on the same thread between actions
+$Worker.Open()
+$Worker.SessionStateProxy.SetVariable('logFile',  $logFile)
+$Worker.SessionStateProxy.SetVariable('logDir',   $logDir)
+$Worker.SessionStateProxy.SetVariable('OutQueue', $OutQueue)
+$Worker.SessionStateProxy.SetVariable('Shared',   $Shared)
+$init = [powershell]::Create()
+$init.Runspace = $Worker
+$null = $init.AddScript("`$ErrorActionPreference = 'Stop'`r`n" + $WorkerFunctions.ToString()).Invoke()
+$init.Dispose()
+
+$script:Job = $null
+
+Function Write-PendingOutput {
+    param([System.Windows.Controls.TextBox]$Box)
+    $line = $null
+    $wrote = $false
+    while ($OutQueue.TryDequeue([ref]$line)) {
+        if ($Box) { $Box.AppendText("$line`r`n"); $wrote = $true }
+    }
+    if ($wrote) { $Box.ScrollToEnd() }
+}
+
+# Polls the running action: streams its output and finishes up when it completes
+$PollTimer = New-Object System.Windows.Threading.DispatcherTimer
+$PollTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+$PollTimer.Add_Tick({
+    $job = $script:Job
+    if (-not $job) { $PollTimer.Stop(); return }
+    $done = $job.Handle.IsCompleted
+    Write-PendingOutput $job.Output
+    if (-not $done) { return }
+
+    $PollTimer.Stop()
+    $script:Job = $null
+    try {
+        $null = $job.PS.EndInvoke($job.Handle)
+        Set-Status $job.SuccessStatus
+    }
+    catch {
+        $err = $_.Exception
+        if ($err -is [System.Management.Automation.MethodInvocationException] -and $err.InnerException) { $err = $err.InnerException }
+        Write-Log ("Action failed: {0}" -f $err.Message) 'ERROR'
+        [System.Windows.MessageBox]::Show($err.Message,'Error','OK','Error') | Out-Null
+        Set-Status 'Failed' 'Red'
+    }
+    finally {
+        $job.PS.Dispose()
+        Update-ConnectionText
+        Hide-Spinner; Set-UIBusy $false
+    }
+})
+
+# Runs $Action in the worker runspace. $Action is re-parsed there, so it can only use
+# its parameters and the functions in $WorkerFunctions, never UI controls.
+Function Start-CaseAction {
+    param(
+        [Parameter(Mandatory=$true)][scriptblock]$Action,
+        [hashtable]$Arguments = @{},
+        [System.Windows.Controls.TextBox]$Output,
+        [string]$SuccessStatus = 'Done!'
+    )
+    if ($Output) { $Output.Clear() }
+    $ps = [powershell]::Create()
+    $ps.Runspace = $Worker
+    $null = $ps.AddScript($Action.ToString()).AddParameters($Arguments)
+
+    $handle = $ps.BeginInvoke()
+    Set-UIBusy $true; Show-Spinner; Set-Status ''
+    $script:Job = @{ PS = $ps; Handle = $handle; Output = $Output; SuccessStatus = $SuccessStatus }
+    $PollTimer.Start()
+}
 
 # Clear status on tab change
 if ($TabCtrl) {
@@ -382,64 +484,48 @@ iVBORw0KGgoAAAANSUhEUgAABJ8AAACoCAYAAABOvU93AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8
 Set-HeaderBanner -InputData $bannerBase64 -DecodePixelHeight 80
 
 # ------------------ Button handlers ------------------
+# Each handler validates input on the UI thread, then hands the cmdlet work to Start-CaseAction.
 $BtnConnect.Add_Click({
-    Set-UIBusy $true; Show-Spinner
-    try {
+    Start-CaseAction -SuccessStatus '' -Action {
         Connect-Compliance
-        $TxtConn.Text = 'Connected to Security & Compliance'
-        $TxtConn.Foreground = 'Green'   # keep the main connection text green on success
-        Set-Status ''                   # no extra status text
     }
-    catch {
-        [System.Windows.MessageBox]::Show(("Connection failed: {0}" -f $_.Exception.Message),'Error','OK','Error') | Out-Null
-        $TxtConn.Text = 'Not connected'
-        $TxtConn.ClearValue([System.Windows.Controls.TextBlock]::ForegroundProperty)
-        Set-Status 'Failed' 'Red'
-    }
-    finally { Hide-Spinner; Set-UIBusy $false }
 })
 
 $BtnAdd_Run.Add_Click({
-    Set-UIBusy $true; Show-Spinner
     try {
-        Connect-Compliance
         $case = $TxtAdd_Case.Text.Trim(); if (-not $case) { throw 'Please enter a Case ID.' }
         $emails = Parse-Emails -EmailsMultiline $TxtAdd_Emails.Text; if (-not $emails -or $emails.Count -eq 0) { throw 'Please enter at least one reviewer email.' }
-        $TxtAdd_Out.Clear()
-        foreach ($m in $emails) {
-            try { Add-ComplianceCaseMember -Case $case -Member $m -ErrorAction Stop; $msg = "Added {0} to {1}" -f $m,$case; Write-Log $msg; $TxtAdd_Out.AppendText("$msg`r`n") }
-            catch { $msg = "Failed adding {0} to {1}: {2}" -f $m,$case,$_.Exception.Message; Write-Log $msg 'ERROR'; $TxtAdd_Out.AppendText("$msg`r`n") }
+        Start-CaseAction -Output $TxtAdd_Out -Arguments @{ Case = $case; Emails = [string[]]$emails } -Action {
+            param([string]$Case, [string[]]$Emails)
+            Connect-Compliance
+            foreach ($m in $Emails) {
+                try { Add-ComplianceCaseMember -Case $Case -Member $m -ErrorAction Stop; Write-Out ("Added {0} to {1}" -f $m,$Case) }
+                catch { Write-Out ("Failed adding {0} to {1}: {2}" -f $m,$Case,$_.Exception.Message) 'ERROR' }
+            }
         }
-        Set-Status 'Done!'
     } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null; Set-Status 'Failed' 'Red' }
-    finally { Hide-Spinner; Set-UIBusy $false }
 })
 
 $BtnExport_Run.Add_Click({
-    Set-UIBusy $true; Show-Spinner
     try {
-        Connect-Compliance
         $cases = Parse-Cases -CasesMultiline $TxtExport_Cases.Text; if (-not $cases -or $cases.Count -eq 0) { throw 'Please enter one or more Case IDs.' }
-        $TxtExport_Out.Clear()
-        foreach ($case in $cases) {
-            try {
-                $outFile = Join-Path $logDir ("AdvancedDiscovery_CaseMembers_{0}.csv" -f $case)
-                $members = Get-ComplianceCaseMember -Case $case -ErrorAction Stop | Select-Object Name, PrimarySmtpAddress
-                $members | Export-Csv -NoTypeInformation -Path $outFile -Encoding UTF8
-                $msg = "Exported {0} members for {1} -> {2}" -f ($members.Count), $case, $outFile
-                Write-Log $msg; $TxtExport_Out.AppendText("$msg`r`n")
-            } catch { $msg = "Export failed for {0}: {1}" -f $case, $_.Exception.Message; Write-Log $msg 'ERROR'; $TxtExport_Out.AppendText("$msg`r`n") }
+        Start-CaseAction -Output $TxtExport_Out -Arguments @{ Cases = [string[]]$cases } -Action {
+            param([string[]]$Cases)
+            Connect-Compliance
+            foreach ($case in $Cases) {
+                try {
+                    $outFile = Join-Path $logDir ("AdvancedDiscovery_CaseMembers_{0}.csv" -f $case)
+                    $members = Get-ComplianceCaseMember -Case $case -ErrorAction Stop | Select-Object Name, PrimarySmtpAddress
+                    $members | Export-Csv -NoTypeInformation -Path $outFile -Encoding UTF8
+                    Write-Out ("Exported {0} members for {1} -> {2}" -f ($members.Count), $case, $outFile)
+                } catch { Write-Out ("Export failed for {0}: {1}" -f $case, $_.Exception.Message) 'ERROR' }
+            }
         }
-        Set-Status 'Done!'
     } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null; Set-Status 'Failed' 'Red' }
-    finally { Hide-Spinner; Set-UIBusy $false }
 })
 
 $BtnRem_Run.Add_Click({
-    Set-UIBusy $true; Show-Spinner
     try {
-        Connect-Compliance
-
         $cases = Parse-Cases -CasesMultiline $TxtRem_Cases.Text
         $emails = Parse-Emails -EmailsMultiline $TxtRem_Emails.Text
         $replacement = $TxtRem_Replacement.Text.Trim()
@@ -447,100 +533,105 @@ $BtnRem_Run.Add_Click({
         if (-not $cases -or $cases.Count -eq 0) { throw 'Please enter one or more Case IDs.' }
         if (-not $replacement) { throw 'Please enter a replacement reviewer email.' }
 
-        $TxtRem_Out.Clear()
+        Start-CaseAction -Output $TxtRem_Out -Arguments @{ Cases = [string[]]$cases; Emails = [string[]]$emails; Replacement = $replacement } -Action {
+            param([string[]]$Cases, [string[]]$Emails, [string]$Replacement)
+            Connect-Compliance
 
-        foreach ($case in $cases) {
-            # Ensure replacement is present first
-            try {
-                Add-ComplianceCaseMember -Case $case -Member $replacement -ErrorAction SilentlyContinue
-                $msg = "Ensured replacement '{0}' is a member of {1}" -f $replacement,$case
-                Write-Log $msg; $TxtRem_Out.AppendText("$msg`r`n")
-            }
-            catch {
-                $msg = "Could not ensure replacement on {0}: {1}" -f $case,$_.Exception.Message
-                Write-Log $msg 'ERROR'; $TxtRem_Out.AppendText("$msg`r`n")
-            }
-
-            # Determine targets to remove
-            $targets = $null
-            if ($emails -and $emails.Count -gt 0) {
-                # Targeted removal (exclude replacement if included)
-                $targets = $emails | Where-Object { $_ -and ($_ -ine $replacement) }
-            } else {
-                # Remove ALL current members except the replacement
+            foreach ($case in $Cases) {
+                # Ensure replacement is present first
                 try {
-                    $targets = Get-CaseMemberEmails -Case $case -ExcludeEmail $replacement
-                    if (-not $targets -or $targets.Count -eq 0) {
-                        $TxtRem_Out.AppendText("No removable members found for case {0} (after excluding replacement).`r`n" -f $case)
+                    Add-ComplianceCaseMember -Case $case -Member $Replacement -ErrorAction SilentlyContinue
+                    Write-Out ("Ensured replacement '{0}' is a member of {1}" -f $Replacement,$case)
+                }
+                catch {
+                    Write-Out ("Could not ensure replacement on {0}: {1}" -f $case,$_.Exception.Message) 'ERROR'
+                }
+
+                # Determine targets to remove
+                $targets = $null
+                if ($Emails -and $Emails.Count -gt 0) {
+                    # Targeted removal (exclude replacement if included)
+                    $targets = $Emails | Where-Object { $_ -and ($_ -ine $Replacement) }
+                } else {
+                    # Remove ALL current members except the replacement
+                    try {
+                        $targets = Get-CaseMemberEmails -Case $case -ExcludeEmail $Replacement
+                        if (-not $targets -or $targets.Count -eq 0) {
+                            Write-Out ("No removable members found for case {0} (after excluding replacement)." -f $case)
+                            continue
+                        } else {
+                            Write-Out ("Removing ALL current members from case {0} (excluding replacement)." -f $case)
+                        }
+                    }
+                    catch {
+                        Write-Out ("Failed to enumerate members for {0}: {1}" -f $case, $_) 'ERROR'
                         continue
-                    } else {
-                        $TxtRem_Out.AppendText("Removing ALL current members from case {0} (excluding replacement).`r`n" -f $case)
                     }
                 }
-                catch {
-                    $TxtRem_Out.AppendText("Failed to enumerate members for {0}: {1}`r`n" -f $case, $_)
-                    continue
-                }
-            }
 
-            foreach ($m in $targets) {
-                if ($m -ieq $replacement) {
-                    $TxtRem_Out.AppendText(("Skipping removal of replacement '{0}' on {1}" -f $replacement,$case) + "`r`n")
-                    continue
-                }
-                try {
-                    Remove-ComplianceCaseMember -Case $case -Member $m -Confirm:$false -ErrorAction Stop
-                    $msg = "Removed {0} from {1}" -f $m,$case
-                    Write-Log $msg; $TxtRem_Out.AppendText("$msg`r`n")
-                }
-                catch {
-                    $msg = "Failed removing {0} from {1}: {2}" -f $m,$case,$_.Exception.Message
-                    Write-Log $msg 'ERROR'; $TxtRem_Out.AppendText("$msg`r`n")
+                foreach ($m in $targets) {
+                    if ($m -ieq $Replacement) {
+                        Write-Out ("Skipping removal of replacement '{0}' on {1}" -f $Replacement,$case)
+                        continue
+                    }
+                    try {
+                        Remove-ComplianceCaseMember -Case $case -Member $m -Confirm:$false -ErrorAction Stop
+                        Write-Out ("Removed {0} from {1}" -f $m,$case)
+                    }
+                    catch {
+                        Write-Out ("Failed removing {0} from {1}: {2}" -f $m,$case,$_.Exception.Message) 'ERROR'
+                    }
                 }
             }
         }
-
-        Set-Status 'Done!'
     }
     catch {
         [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null
         Set-Status 'Failed' 'Red'
     }
-    finally { Hide-Spinner; Set-UIBusy $false }
 })
 
 $BtnClose_Run.Add_Click({
-    Set-UIBusy $true; Show-Spinner
     try {
-        Connect-Compliance
         $cases = Parse-Cases -CasesMultiline $TxtClose_Cases.Text; if (-not $cases -or $cases.Count -eq 0) { throw 'Please enter one or more Case IDs.' }
-        $TxtClose_Out.Clear()
-        foreach ($case in $cases) {
-            try { Set-ComplianceCase -Identity $case -Close -Confirm:$false -ErrorAction Stop; $msg = "Closed case: {0}" -f $case; Write-Log $msg; $TxtClose_Out.AppendText("$msg`r`n") }
-            catch { $msg = "Failed closing {0}: {1}" -f $case, $_.Exception.Message; Write-Log $msg 'ERROR'; $TxtClose_Out.AppendText("$msg`r`n") }
+        Start-CaseAction -Output $TxtClose_Out -Arguments @{ Cases = [string[]]$cases } -Action {
+            param([string[]]$Cases)
+            Connect-Compliance
+            foreach ($case in $Cases) {
+                try { Set-ComplianceCase -Identity $case -Close -Confirm:$false -ErrorAction Stop; Write-Out ("Closed case: {0}" -f $case) }
+                catch { Write-Out ("Failed closing {0}: {1}" -f $case, $_.Exception.Message) 'ERROR' }
+            }
         }
-        Set-Status 'Done!'
     } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null; Set-Status 'Failed' 'Red' }
-    finally { Hide-Spinner; Set-UIBusy $false }
 })
 
 $BtnDelete_Run.Add_Click({
     $prompt = [System.Windows.MessageBox]::Show('This will DELETE the listed cases. This action is irreversible. Continue?','Confirm Delete','YesNo','Warning')
     if ($prompt -ne 'Yes') { return }
 
-    Set-UIBusy $true; Show-Spinner
     try {
-        Connect-Compliance
         $cases = Parse-Cases -CasesMultiline $TxtDelete_Cases.Text; if (-not $cases -or $cases.Count -eq 0) { throw 'Please enter one or more Case IDs.' }
-        $TxtDelete_Out.Clear()
-        foreach ($case in $cases) {
-            try { Remove-ComplianceCase -Identity $case -Confirm:$false -ErrorAction Stop; $msg = "Deleted case: {0}" -f $case; Write-Log $msg; $TxtDelete_Out.AppendText("$msg`r`n") }
-            catch { $msg = "Failed deleting {0}: {1}" -f $case, $_.Exception.Message; Write-Log $msg 'ERROR'; $TxtDelete_Out.AppendText("$msg`r`n") }
+        Start-CaseAction -Output $TxtDelete_Out -Arguments @{ Cases = [string[]]$cases } -Action {
+            param([string[]]$Cases)
+            Connect-Compliance
+            foreach ($case in $Cases) {
+                try { Remove-ComplianceCase -Identity $case -Confirm:$false -ErrorAction Stop; Write-Out ("Deleted case: {0}" -f $case) }
+                catch { Write-Out ("Failed deleting {0}: {1}" -f $case, $_.Exception.Message) 'ERROR' }
+            }
         }
-        Set-Status 'Done!'
     } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null; Set-Status 'Failed' 'Red' }
-    finally { Hide-Spinner; Set-UIBusy $false }
+})
+
+# Closing mid-action stops the running pipeline rather than leaving it running unseen
+$window.Add_Closing({
+    param($s, $e)
+    if (-not $script:Job) { return }
+    $answer = [System.Windows.MessageBox]::Show('An action is still running. Stop it and close?','Action Running','YesNo','Warning')
+    if ($answer -ne 'Yes') { $e.Cancel = $true; return }
+    Write-Log 'Window closed while an action was running; stopping it.' 'WARN'
+    $null = $script:Job.PS.BeginStop($null, $null)
 })
 
 # ------------------ Show UI ------------------
 $null = $window.ShowDialog()
+try { $Worker.Dispose() } catch { }
