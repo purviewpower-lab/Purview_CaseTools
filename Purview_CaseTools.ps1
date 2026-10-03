@@ -1,5 +1,5 @@
 <#
-Purview-Case-Tools_v6
+Purview-Case-Tools_v7
 #>
 [CmdletBinding()]
 param()
@@ -11,8 +11,8 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out
 $logFile = Join-Path $logDir ("PurviewTools_{0}.log" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
 
 # State shared between the UI thread and the background worker runspace
-$OutQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[string]'
-$Shared   = [hashtable]::Synchronized(@{ IsConnected = $false })
+$OutQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+$Shared   = [hashtable]::Synchronized(@{ IsConnected = $false; Account = $null; Tenant = $null })
 
 # Functions used by the actions. They are loaded here and into the worker runspace,
 # where every Security & Compliance cmdlet runs so the window stays responsive.
@@ -23,11 +23,25 @@ $WorkerFunctions = {
         $line | Tee-Object -FilePath $logFile -Append | Out-Null
     }
 
-    # Log a line and queue it for the active tab's output box
-    Function Write-Out {
-        param([string]$Message, [string]$Level = 'INFO')
-        Write-Log $Message $Level
-        $OutQueue.Enqueue($Message)
+    # Log one outcome and queue it as a row for the active tab's results grid
+    Function Write-Result {
+        param(
+            [string]$Case,
+            [string]$Member,
+            [string]$Action,
+            [ValidateSet('Success','Failed','Skipped','Info')][string]$Result,
+            [string]$Detail
+        )
+        $level = if ($Result -eq 'Failed') { 'ERROR' } else { 'INFO' }
+        Write-Log ("{0} | case '{1}' | member '{2}' | {3} | {4}" -f $Action, $Case, $Member, $Result, $Detail) $level
+        $OutQueue.Enqueue([pscustomobject]@{
+            Time   = Get-Date -Format 'HH:mm:ss'
+            Case   = $Case
+            Member = $Member
+            Action = $Action
+            Result = $Result
+            Detail = $Detail
+        })
     }
 
     Function Ensure-Modules {
@@ -37,15 +51,37 @@ $WorkerFunctions = {
         }
     }
 
+    # The Security & Compliance connection, or $null when this module version cannot report it
+    Function Get-IppsConnection {
+        if (-not (Get-Command Get-ConnectionInformation -ErrorAction SilentlyContinue)) { return $null }
+        Get-ConnectionInformation -ErrorAction SilentlyContinue |
+            Where-Object { $_.IsEopSession -or ($_.ConnectionUri -match 'compliance') } |
+            Select-Object -First 1
+    }
+
     Function Connect-Compliance {
-        if ($Shared.IsConnected) { return }
+        if ($Shared.IsConnected) {
+            # Older module versions have no Get-ConnectionInformation; trust the flag there
+            if (-not (Get-Command Get-ConnectionInformation -ErrorAction SilentlyContinue)) { return }
+            $conn = Get-IppsConnection
+            if ($conn -and $conn.State -eq 'Connected' -and $conn.TokenStatus -ne 'Expired') { return }
+            Write-Log "Security & Compliance session expired or was lost; reconnecting." "WARN"
+            $Shared.IsConnected = $false
+            $Shared.Account = $null
+            $Shared.Tenant = $null
+        }
         Ensure-Modules
         Import-Module ExchangeOnlineManagement -ErrorAction Stop
         Write-Log "Connecting to Security & Compliance (IPPS Session)..."
         try {
             Connect-IPPSSession -ErrorAction Stop | Out-Null
+            $conn = Get-IppsConnection
+            if ($conn) {
+                $Shared.Account = [string]$conn.UserPrincipalName
+                $Shared.Tenant  = [string]$conn.TenantID
+            }
             $Shared.IsConnected = $true
-            Write-Log "Connected."
+            Write-Log ("Connected as {0} (tenant {1})." -f $Shared.Account, $Shared.Tenant)
         }
         catch {
             Write-Log ("Failed to connect: {0}" -f $_.Exception.Message) "ERROR"
@@ -81,6 +117,13 @@ $WorkerFunctions = {
             throw $msg
         }
     }
+
+    # Case names can contain characters that are not allowed in file names
+    Function ConvertTo-SafeFileName {
+        param([string]$Name)
+        $pattern = '[{0}]' -f [regex]::Escape(-join [System.IO.Path]::GetInvalidFileNameChars())
+        ($Name -replace $pattern, '_').Trim()
+    }
 }
 . $WorkerFunctions
 
@@ -107,7 +150,20 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework | Out-Null
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Purview Case Tools" Height="760" Width="650" WindowStartupLocation="CenterScreen">
+        Title="Purview Case Tools" Height="820" Width="920" MinHeight="600" MinWidth="720" WindowStartupLocation="CenterScreen">
+  <Window.Resources>
+    <!-- Failed rows in any results grid show in red -->
+    <Style TargetType="DataGridRow">
+      <Style.Triggers>
+        <DataTrigger Binding="{Binding Result}" Value="Failed">
+          <Setter Property="Foreground" Value="#B71C1C"/>
+        </DataTrigger>
+      </Style.Triggers>
+    </Style>
+    <Style TargetType="Button">
+      <Setter Property="Padding" Value="10,6"/>
+    </Style>
+  </Window.Resources>
   <Grid Margin="10">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
@@ -121,7 +177,7 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework | Out-Null
 
       <DockPanel LastChildFill="False">
         <StackPanel Orientation="Horizontal" DockPanel.Dock="Left" VerticalAlignment="Center">
-          <Button x:Name="BtnConnect" Content="Connect to Security &amp; Compliance" Padding="10,6" Margin="0,0,10,0"/>
+          <Button x:Name="BtnConnect" Content="Connect to Security &amp; Compliance" Margin="0,0,10,0"/>
           <TextBlock x:Name="TxtConn" Text="Not connected" VerticalAlignment="Center"/>
         </StackPanel>
         <!-- Animated Working... text -->
@@ -131,7 +187,34 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework | Out-Null
     </StackPanel>
 
     <TabControl x:Name="TabControl" Grid.Row="1">
-      <!-- Add Reviewers (renamed) -->
+      <!-- Cases: list, search, reopen -->
+      <TabItem Header="Cases">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="2*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <DockPanel Margin="0,0,0,8">
+            <TextBlock Text="Search:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <Button x:Name="BtnCases_Refresh" DockPanel.Dock="Right" Content="Load / Refresh Cases" Margin="10,0,0,0"/>
+            <CheckBox x:Name="ChkCases_Closed" DockPanel.Dock="Right" Content="Show closed cases" IsChecked="True" VerticalAlignment="Center" Margin="10,0,0,0"/>
+            <TextBox x:Name="TxtCases_Search" VerticalContentAlignment="Center"/>
+          </DockPanel>
+          <DataGrid Grid.Row="1" x:Name="GridCases"/>
+          <DockPanel Grid.Row="2" Margin="0,8,0,8" LastChildFill="False">
+            <Button x:Name="BtnCases_Reopen" Content="Reopen Selected" Margin="0,0,10,0"/>
+            <Button x:Name="BtnCases_Copy" Content="Copy Selected Names"/>
+            <TextBlock x:Name="TxtCases_Count" DockPanel.Dock="Right" VerticalAlignment="Center" Foreground="Gray" Text="Click Load / Refresh Cases to list cases."/>
+          </DockPanel>
+          <DataGrid Grid.Row="3" x:Name="GridCases_Results"/>
+          <Button Grid.Row="4" x:Name="BtnCases_Save" Content="Save Results as CSV..." HorizontalAlignment="Left" Margin="0,8,0,0"/>
+        </Grid>
+      </TabItem>
+
+      <!-- Add Reviewers -->
       <TabItem Header="Add Reviewers">
         <Grid Margin="10">
           <Grid.RowDefinitions>
@@ -139,82 +222,87 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework | Out-Null
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
           <StackPanel Orientation="Vertical" Margin="0,0,0,10">
-            <TextBlock Text="Case ID (single):" FontWeight="Bold"/>
-            <TextBox x:Name="TxtAdd_Case" Width="300"/>
+            <TextBlock Text="Case Name / ECM Reference (one per line):" FontWeight="Bold"/>
+            <DockPanel>
+              <Button x:Name="BtnAdd_Pick" DockPanel.Dock="Right" Content="Pick Cases..." VerticalAlignment="Top" Margin="8,0,0,0"/>
+              <TextBox x:Name="TxtAdd_Cases" Height="80" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+            </DockPanel>
           </StackPanel>
           <StackPanel Grid.Row="1" Orientation="Vertical" Margin="0,0,0,10">
             <TextBlock Text="Reviewers to add (newline-separated):" FontWeight="Bold"/>
-            <DockPanel>
-              <TextBox x:Name="TxtAdd_Emails" Height="110" AcceptsReturn="True" TextWrapping="Wrap"/>
-            </DockPanel>
+            <TextBox x:Name="TxtAdd_Emails" Height="100" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
           </StackPanel>
           <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button x:Name="BtnAdd_Run" Content="Add Reviewers" Padding="10,6"/>
+            <Button x:Name="BtnAdd_Run" Content="Add Reviewers"/>
           </StackPanel>
-          <TextBox Grid.Row="3" x:Name="TxtAdd_Out" Height="220" VerticalScrollBarVisibility="Auto" IsReadOnly="True" TextWrapping="Wrap"/>
+          <DataGrid Grid.Row="3" x:Name="GridAdd_Results"/>
+          <Button Grid.Row="4" x:Name="BtnAdd_Save" Content="Save Results as CSV..." HorizontalAlignment="Left" Margin="0,8,0,0"/>
         </Grid>
       </TabItem>
 
-           <!-- Remove Reviewers (Bulk + replacement) -->
-      
-<TabItem Header="Remove Reviewers">
-  <Grid Margin="10">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="*"/>
-    </Grid.RowDefinitions>
+      <!-- Remove Reviewers (Bulk + replacement) -->
+      <TabItem Header="Remove Reviewers">
+        <Grid Margin="10">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <StackPanel Orientation="Vertical" Margin="0,0,0,10">
+            <TextBlock Text="Case Name / ECM Reference (one per line):" FontWeight="Bold"/>
+            <DockPanel>
+              <Button x:Name="BtnRem_Pick" DockPanel.Dock="Right" Content="Pick Cases..." VerticalAlignment="Top" Margin="8,0,0,0"/>
+              <TextBox x:Name="TxtRem_Cases" Height="80" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+            </DockPanel>
+          </StackPanel>
+          <StackPanel Grid.Row="1" Orientation="Vertical" Margin="0,0,0,10">
+            <TextBlock Text="Reviewers to remove (newline-separated):" FontWeight="Bold"/>
+            <TextBox x:Name="TxtRem_Emails" Height="100" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+            <TextBlock
+              Text="Leave the box empty to remove all current reviewers on each case (the replacement will still be added)."
+              Foreground="Gray"
+              FontStyle="Italic"
+              Margin="0,4,0,0"/>
+          </StackPanel>
+          <StackPanel Grid.Row="2" Orientation="Vertical" Margin="0,0,0,10">
+            <TextBlock Text="Cases must have at least 1 member - specify member email address:" FontWeight="Bold"/>
+            <TextBox x:Name="TxtRem_Replacement" Width="350" HorizontalAlignment="Left"/>
+          </StackPanel>
+          <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button x:Name="BtnRem_Run" Content="Remove + Replace"/>
+          </StackPanel>
+          <DataGrid Grid.Row="4" x:Name="GridRem_Results"/>
+          <Button Grid.Row="5" x:Name="BtnRem_Save" Content="Save Results as CSV..." HorizontalAlignment="Left" Margin="0,8,0,0"/>
+        </Grid>
+      </TabItem>
 
-    <StackPanel Orientation="Vertical" Margin="0,0,0,10">
-      <TextBlock Text="Case IDs (multiple allowed):" FontWeight="Bold"/>
-      <TextBox x:Name="TxtRem_Cases" Height="80" AcceptsReturn="True" TextWrapping="Wrap"/>
-    </StackPanel>
-
-    <StackPanel Grid.Row="1" Orientation="Vertical" Margin="0,0,0,10">
-      <TextBlock Text="Reviewers to remove (newline-separated):" FontWeight="Bold"/>
-      <DockPanel>
-        <TextBox x:Name="TxtRem_Emails" Height="110" AcceptsReturn="True" TextWrapping="Wrap"/>
-      </DockPanel>
-      <!-- New helper text -->
-      <TextBlock
-        Text="Leave the box empty to remove all current reviewers on each case (the replacement will still be added)."
-        Foreground="Gray"
-        FontStyle="Italic"
-        Margin="0,4,0,0"/>
-    </StackPanel>
-
-    <StackPanel Grid.Row="2" Orientation="Vertical" Margin="0,0,0,10">
-      <TextBlock Text="Cases must have at least 1 member - specify member email address:" FontWeight="Bold"/>
-      <TextBox x:Name="TxtRem_Replacement" Width="350"/>
-    </StackPanel>
-
-    <StackPanel Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,10">
-      <Button x:Name="BtnRem_Run" Content="Remove + Replace" Padding="10,6"/>
-    </StackPanel>
-
-    <TextBox Grid.Row="4" x:Name="TxtRem_Out" Height="220" VerticalScrollBarVisibility="Auto" IsReadOnly="True" TextWrapping="Wrap"/>
-  </Grid>
-</TabItem>
- <!-- Export Members (now multi-case) -->
+      <!-- Export Case Permissions -->
       <TabItem Header="Export Case Permissions">
         <Grid Margin="10">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
           <StackPanel Orientation="Vertical" Margin="0,0,0,10">
-            <TextBlock Text="Case IDs (newline-separated):" FontWeight="Bold"/>
-            <TextBox x:Name="TxtExport_Cases" Height="120" AcceptsReturn="True" TextWrapping="Wrap"/>
+            <TextBlock Text="Case Name / ECM Reference (one per line):" FontWeight="Bold"/>
+            <DockPanel>
+              <Button x:Name="BtnExport_Pick" DockPanel.Dock="Right" Content="Pick Cases..." VerticalAlignment="Top" Margin="8,0,0,0"/>
+              <TextBox x:Name="TxtExport_Cases" Height="120" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+            </DockPanel>
           </StackPanel>
           <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button x:Name="BtnExport_Run" Content="Export Members" Padding="10,6"/>
+            <Button x:Name="BtnExport_Run" Content="Export Case Permissions"/>
           </StackPanel>
-          <TextBox Grid.Row="2" x:Name="TxtExport_Out" Height="220" VerticalScrollBarVisibility="Auto" IsReadOnly="True" TextWrapping="Wrap"/>
+          <DataGrid Grid.Row="2" x:Name="GridExport_Results"/>
+          <Button Grid.Row="3" x:Name="BtnExport_Save" Content="Save Results as CSV..." HorizontalAlignment="Left" Margin="0,8,0,0"/>
         </Grid>
       </TabItem>
 
@@ -225,15 +313,20 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework | Out-Null
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
           <StackPanel Orientation="Vertical" Margin="0,0,0,10">
-            <TextBlock Text="Case IDs to close (newline separated):" FontWeight="Bold"/>
-            <TextBox x:Name="TxtClose_Cases" Height="120" AcceptsReturn="True" TextWrapping="Wrap"/>
+            <TextBlock Text="Case Name / ECM Reference to close (one per line):" FontWeight="Bold"/>
+            <DockPanel>
+              <Button x:Name="BtnClose_Pick" DockPanel.Dock="Right" Content="Pick Cases..." VerticalAlignment="Top" Margin="8,0,0,0"/>
+              <TextBox x:Name="TxtClose_Cases" Height="120" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+            </DockPanel>
           </StackPanel>
           <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button x:Name="BtnClose_Run" Content="Close Cases" Padding="10,6"/>
+            <Button x:Name="BtnClose_Run" Content="Close Cases"/>
           </StackPanel>
-          <TextBox Grid.Row="2" x:Name="TxtClose_Out" Height="220" VerticalScrollBarVisibility="Auto" IsReadOnly="True" TextWrapping="Wrap"/>
+          <DataGrid Grid.Row="2" x:Name="GridClose_Results"/>
+          <Button Grid.Row="3" x:Name="BtnClose_Save" Content="Save Results as CSV..." HorizontalAlignment="Left" Margin="0,8,0,0"/>
         </Grid>
       </TabItem>
 
@@ -244,20 +337,51 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework | Out-Null
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
           <StackPanel Orientation="Vertical" Margin="0,0,0,10">
-            <TextBlock Text="Case IDs to delete (newline separated):" FontWeight="Bold"/>
-            <TextBox x:Name="TxtDelete_Cases" Height="120" AcceptsReturn="True" TextWrapping="Wrap"/>
+            <TextBlock Text="Case Name / ECM Reference to delete (one per line):" FontWeight="Bold"/>
+            <DockPanel>
+              <Button x:Name="BtnDelete_Pick" DockPanel.Dock="Right" Content="Pick Cases..." VerticalAlignment="Top" Margin="8,0,0,0"/>
+              <TextBox x:Name="TxtDelete_Cases" Height="120" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+            </DockPanel>
           </StackPanel>
           <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button x:Name="BtnDelete_Run" Content="Delete Cases" Padding="10,6" Background="#FFBF5B5B" Foreground="White"/>
+            <Button x:Name="BtnDelete_Run" Content="Delete Cases" Background="#FFBF5B5B" Foreground="White"/>
           </StackPanel>
-          <TextBox Grid.Row="2" x:Name="TxtDelete_Out" Height="220" VerticalScrollBarVisibility="Auto" IsReadOnly="True" TextWrapping="Wrap"/>
+          <DataGrid Grid.Row="2" x:Name="GridDelete_Results"/>
+          <Button Grid.Row="3" x:Name="BtnDelete_Save" Content="Save Results as CSV..." HorizontalAlignment="Left" Margin="0,8,0,0"/>
         </Grid>
       </TabItem>
     </TabControl>
 
-    <TextBlock Grid.Row="2" x:Name="TxtLogPath" Text="Logs: (see log file)" FontStyle="Italic"/>
+    <TextBlock Grid.Row="2" x:Name="TxtLogPath" Text="Logs: (see log file)" FontStyle="Italic" Margin="0,6,0,0"/>
+  </Grid>
+</Window>
+'@
+
+# Case picker dialog, opened from the "Pick Cases..." buttons
+$pickerXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Pick Cases" Height="560" Width="720" MinHeight="300" MinWidth="450" WindowStartupLocation="CenterOwner">
+  <Grid Margin="10">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <DockPanel Margin="0,0,0,8">
+      <TextBlock Text="Search:" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,6,0"/>
+      <CheckBox x:Name="ChkPick_Closed" DockPanel.Dock="Right" Content="Show closed cases" VerticalAlignment="Center" Margin="10,0,0,0"/>
+      <TextBox x:Name="TxtPick_Search" VerticalContentAlignment="Center"/>
+    </DockPanel>
+    <DataGrid Grid.Row="1" x:Name="GridPick"/>
+    <DockPanel Grid.Row="2" Margin="0,8,0,0" LastChildFill="False">
+      <TextBlock x:Name="TxtPick_Count" VerticalAlignment="Center" Foreground="Gray"/>
+      <Button x:Name="BtnPick_Cancel" DockPanel.Dock="Right" Content="Cancel" IsCancel="True" Padding="10,6" Margin="8,0,0,0"/>
+      <Button x:Name="BtnPick_Ok" DockPanel.Dock="Right" Content="Add Selected" IsDefault="True" Padding="10,6"/>
+    </DockPanel>
   </Grid>
 </Window>
 '@
@@ -265,39 +389,14 @@ Add-Type -AssemblyName PresentationCore, PresentationFramework | Out-Null
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
-# Find controls
-$HeaderBanner = $window.FindName('HeaderBanner')
-$BtnConnect   = $window.FindName('BtnConnect')
-$TxtConn      = $window.FindName('TxtConn')
-$TxtWorking   = $window.FindName('TxtWorking')
-$TxtStatus    = $window.FindName('TxtStatus')
-$TxtLogPath   = $window.FindName('TxtLogPath')
-$TabCtrl      = $window.FindName('TabControl')
-
-$TxtAdd_Case  = $window.FindName('TxtAdd_Case')
-$TxtAdd_Emails= $window.FindName('TxtAdd_Emails')
-$BtnAdd_Populate = $window.FindName('BtnAdd_Populate')
-$BtnAdd_Run   = $window.FindName('BtnAdd_Run')
-$TxtAdd_Out   = $window.FindName('TxtAdd_Out')
-
-$TxtExport_Cases = $window.FindName('TxtExport_Cases')
-$BtnExport_Run   = $window.FindName('BtnExport_Run')
-$TxtExport_Out   = $window.FindName('TxtExport_Out')
-
-$TxtRem_Cases = $window.FindName('TxtRem_Cases')
-$TxtRem_Emails = $window.FindName('TxtRem_Emails')
-$TxtRem_Replacement = $window.FindName('TxtRem_Replacement')
-$BtnRem_Populate = $window.FindName('BtnRem_Populate')
-$BtnRem_Run = $window.FindName('BtnRem_Run')
-$TxtRem_Out = $window.FindName('TxtRem_Out')
-
-$TxtClose_Cases = $window.FindName('TxtClose_Cases')
-$BtnClose_Run = $window.FindName('BtnClose_Run')
-$TxtClose_Out = $window.FindName('TxtClose_Out')
-
-$TxtDelete_Cases = $window.FindName('TxtDelete_Cases')
-$BtnDelete_Run = $window.FindName('BtnDelete_Run')
-$TxtDelete_Out = $window.FindName('TxtDelete_Out')
+# Find every named control and expose it as a script variable of the same name
+$xamlNs = 'http://schemas.microsoft.com/winfx/2006/xaml'
+$nsMgr = New-Object System.Xml.XmlNamespaceManager($xaml.NameTable)
+$nsMgr.AddNamespace('x', $xamlNs)
+$controlNames = foreach ($node in $xaml.SelectNodes('//*[@x:Name]', $nsMgr)) { $node.GetAttribute('Name', $xamlNs) }
+foreach ($name in $controlNames) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
+$TabCtrl = $TabControl
+$AllButtons = foreach ($name in $controlNames -like 'Btn*') { Get-Variable -Name $name -ValueOnly }
 
 # Set log path text programmatically
 $TxtLogPath.Text = "Logs: $logFile"
@@ -328,15 +427,14 @@ Function Set-Status($msg, $color='Green') {
     $TxtStatus.Foreground = $color
 }
 Function Set-UIBusy([bool]$busy) {
-    $controls = @(
-        $BtnConnect, $BtnAdd_Run, $BtnExport_Run, $BtnRem_Run,
-        $BtnClose_Run, $BtnDelete_Run, $BtnAdd_Populate, $BtnRem_Populate
-    )
-    foreach ($c in $controls) { if ($c) { $c.IsEnabled = -not $busy } }
+    foreach ($c in $AllButtons) { if ($c) { $c.IsEnabled = -not $busy } }
 }
 Function Update-ConnectionText {
     if ($Shared.IsConnected) {
-        $TxtConn.Text = 'Connected to Security & Compliance'
+        $text = 'Connected to Security & Compliance'
+        if ($Shared.Account) { $text = 'Connected as {0}' -f $Shared.Account }
+        if ($Shared.Tenant)  { $text += ' | Tenant {0}' -f $Shared.Tenant }
+        $TxtConn.Text = $text
         $TxtConn.Foreground = 'Green'
     } else {
         $TxtConn.Text = 'Not connected'
@@ -344,9 +442,67 @@ Function Update-ConnectionText {
     }
 }
 
+# Clear status on tab change (ignore selection changes bubbling up from the grids)
+if ($TabCtrl) {
+    $TabCtrl.Add_SelectionChanged({
+        param($s, $e)
+        if ($e.OriginalSource -ne $s) { return }
+        Set-Status ''
+    })
+}
+
+# ------------------ Grids ------------------
+Function New-GridColumn {
+    param([string]$Header, [string]$Path, [switch]$Fill)
+    $col = New-Object System.Windows.Controls.DataGridTextColumn
+    $col.Header = $Header
+    $col.Binding = New-Object System.Windows.Data.Binding($Path)
+    if ($Fill) { $col.Width = New-Object System.Windows.Controls.DataGridLength(1, 'Star') }
+    $col
+}
+Function Initialize-Grid {
+    param([System.Windows.Controls.DataGrid]$Grid, [string[]]$Columns, [string]$FillColumn)
+    $Grid.AutoGenerateColumns = $false
+    $Grid.IsReadOnly = $true
+    $Grid.CanUserAddRows = $false
+    $Grid.SelectionMode = 'Extended'
+    $Grid.HeadersVisibility = 'Column'
+    $Grid.GridLinesVisibility = 'Horizontal'
+    foreach ($c in $Columns) { $Grid.Columns.Add((New-GridColumn -Header $c -Path $c -Fill:($c -eq $FillColumn))) }
+}
+
+# One results collection per tab; the worker's Write-Result rows land in the active one
+$ResultsByGrid = @{}
+foreach ($grid in @($GridCases_Results, $GridAdd_Results, $GridRem_Results, $GridExport_Results, $GridClose_Results, $GridDelete_Results)) {
+    Initialize-Grid -Grid $grid -Columns 'Time','Case','Member','Action','Result','Detail' -FillColumn 'Detail'
+    $items = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+    $grid.ItemsSource = $items
+    $ResultsByGrid[$grid.Name] = $items
+}
+Initialize-Grid -Grid $GridCases -Columns 'Name','Type','Status','Created' -FillColumn 'Name'
+
+Function Save-Results {
+    param([System.Windows.Controls.DataGrid]$Grid, [string]$Label)
+    $items = $ResultsByGrid[$Grid.Name]
+    if (-not $items -or $items.Count -eq 0) {
+        [System.Windows.MessageBox]::Show('There are no results to save yet.','Save Results','OK','Information') | Out-Null
+        return
+    }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = 'CSV files (*.csv)|*.csv'
+    $dlg.InitialDirectory = $logDir
+    $dlg.FileName = 'PurviewCaseTools_{0}_{1}.csv' -f $Label, (Get-Date -Format 'yyyyMMdd_HHmmss')
+    if ($dlg.ShowDialog($window)) {
+        $items | Select-Object Time, Case, Member, Action, Result, Detail |
+            Export-Csv -NoTypeInformation -LiteralPath $dlg.FileName -Encoding UTF8
+        Write-Log ("Saved {0} results to {1}" -f $items.Count, $dlg.FileName)
+        Set-Status ('Saved {0}' -f [System.IO.Path]::GetFileName($dlg.FileName))
+    }
+}
+
 # ------------------ Background worker ------------------
 # One long-lived runspace owns the IPPS connection and runs all cmdlets. The UI thread only
-# reads inputs, starts an action, and appends queued output while the action runs.
+# reads inputs, starts an action, and adds queued results to the grid while the action runs.
 $Worker = [runspacefactory]::CreateRunspace($Host)   # share the console host so module warnings still show there
 $Worker.ApartmentState = 'STA'          # interactive sign-in needs an STA thread
 $Worker.ThreadOptions  = 'ReuseThread'  # keep the connection on the same thread between actions
@@ -363,73 +519,182 @@ $init.Dispose()
 $script:Job = $null
 
 Function Write-PendingOutput {
-    param([System.Windows.Controls.TextBox]$Box)
-    $line = $null
-    $wrote = $false
-    while ($OutQueue.TryDequeue([ref]$line)) {
-        if ($Box) { $Box.AppendText("$line`r`n"); $wrote = $true }
+    param($Results)
+    $row = $null
+    while ($OutQueue.TryDequeue([ref]$row)) {
+        if ($null -ne $Results) { $Results.Add($row) }
     }
-    if ($wrote) { $Box.ScrollToEnd() }
 }
 
-# Polls the running action: streams its output and finishes up when it completes
+Function Set-RunSummary {
+    param($Results)
+    $ok  = @($Results | Where-Object { $_.Result -eq 'Success' }).Count
+    $bad = @($Results | Where-Object { $_.Result -eq 'Failed' }).Count
+    if ($bad -gt 0) { Set-Status ('Done: {0} succeeded, {1} failed' -f $ok, $bad) 'Red' }
+    else            { Set-Status ('Done: {0} succeeded' -f $ok) }
+}
+
+# Polls the running action: streams its results and finishes up when it completes
 $PollTimer = New-Object System.Windows.Threading.DispatcherTimer
 $PollTimer.Interval = [TimeSpan]::FromMilliseconds(150)
 $PollTimer.Add_Tick({
     $job = $script:Job
     if (-not $job) { $PollTimer.Stop(); return }
     $done = $job.Handle.IsCompleted
-    Write-PendingOutput $job.Output
+    Write-PendingOutput $job.Results
     if (-not $done) { return }
 
     $PollTimer.Stop()
     $script:Job = $null
-    try {
-        $null = $job.PS.EndInvoke($job.Handle)
-        Set-Status $job.SuccessStatus
-    }
+    $output = $null
+    $failure = $null
+    try { $output = $job.PS.EndInvoke($job.Handle) }
     catch {
-        $err = $_.Exception
-        if ($err -is [System.Management.Automation.MethodInvocationException] -and $err.InnerException) { $err = $err.InnerException }
-        Write-Log ("Action failed: {0}" -f $err.Message) 'ERROR'
-        [System.Windows.MessageBox]::Show($err.Message,'Error','OK','Error') | Out-Null
-        Set-Status 'Failed' 'Red'
+        $failure = $_.Exception
+        if ($failure -is [System.Management.Automation.MethodInvocationException] -and $failure.InnerException) { $failure = $failure.InnerException }
     }
-    finally {
-        $job.PS.Dispose()
-        Update-ConnectionText
-        Hide-Spinner; Set-UIBusy $false
+    finally { $job.PS.Dispose() }
+
+    Update-ConnectionText
+    Hide-Spinner; Set-UIBusy $false
+
+    if ($failure) {
+        Write-Log ("Action failed: {0}" -f $failure.Message) 'ERROR'
+        [System.Windows.MessageBox]::Show($failure.Message,'Error','OK','Error') | Out-Null
+        Set-Status 'Failed' 'Red'
+        return
+    }
+    if ($null -ne $job.SuccessStatus) { Set-Status $job.SuccessStatus }
+    elseif ($null -ne $job.Results)   { Set-RunSummary $job.Results }
+    else                              { Set-Status 'Done!' }
+
+    # Runs after the UI is released, so it may open a dialog or start another action
+    if ($job.OnSuccess) {
+        try { & $job.OnSuccess $output }
+        catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Error','OK','Error') | Out-Null }
     }
 })
 
 # Runs $Action in the worker runspace. $Action is re-parsed there, so it can only use
 # its parameters and the functions in $WorkerFunctions, never UI controls.
+# $OnSuccess runs on the UI thread with the action's output.
 Function Start-CaseAction {
     param(
         [Parameter(Mandatory=$true)][scriptblock]$Action,
         [hashtable]$Arguments = @{},
-        [System.Windows.Controls.TextBox]$Output,
-        [string]$SuccessStatus = 'Done!'
+        [System.Windows.Controls.DataGrid]$ResultsGrid,
+        [AllowNull()][object]$SuccessStatus = $null,
+        [scriptblock]$OnSuccess
     )
-    if ($Output) { $Output.Clear() }
+    $results = $null
+    if ($ResultsGrid) { $results = $ResultsByGrid[$ResultsGrid.Name]; $results.Clear() }
     $ps = [powershell]::Create()
     $ps.Runspace = $Worker
-    $null = $ps.AddScript($Action.ToString()).AddParameters($Arguments)
+    $null = $ps.AddScript($Action.ToString(), $true).AddParameters($Arguments)   # local scope: no leftovers between actions
 
     $handle = $ps.BeginInvoke()
     Set-UIBusy $true; Show-Spinner; Set-Status ''
-    $script:Job = @{ PS = $ps; Handle = $handle; Output = $Output; SuccessStatus = $SuccessStatus }
+    $script:Job = @{ PS = $ps; Handle = $handle; Results = $results; SuccessStatus = $SuccessStatus; OnSuccess = $OnSuccess }
     $PollTimer.Start()
 }
 
-# Clear status on tab change
-if ($TabCtrl) {
-    $TabCtrl.Add_SelectionChanged({
-        Set-Status ''
-        # Optional: if you want to keep TxtConn green when connected, comment the next line
-        # $TxtConn.ClearValue([System.Windows.Controls.TextBlock]::ForegroundProperty)
-    })
+# ------------------ Case list and picker ------------------
+$script:CaseCache = @()
+$script:AfterCaseLoad = $null
+
+$LoadCasesAction = {
+    Connect-Compliance
+    $seen = @{}
+    $loaded = 0
+    foreach ($type in 'eDiscovery', 'AdvancedEdiscovery') {
+        try { $cases = @(Get-ComplianceCase -CaseType $type -ErrorAction Stop) }
+        catch { Write-Log ("Could not list {0} cases: {1}" -f $type, $_.Exception.Message) 'WARN'; continue }
+        $loaded++
+        foreach ($c in $cases) {
+            $id = [string]$c.Identity
+            if ($seen.ContainsKey($id)) { continue }
+            $seen[$id] = $true
+            $created = ''
+            if ($c.CreatedDateTime) { $created = ([datetime]$c.CreatedDateTime).ToString('yyyy-MM-dd') }
+            [pscustomobject]@{
+                Name     = [string]$c.Name
+                Type     = $(if ($type -eq 'AdvancedEdiscovery') { 'Premium' } else { 'Standard' })
+                Status   = [string]$c.Status
+                Created  = $created
+                Identity = $id
+            }
+        }
+    }
+    if ($loaded -eq 0) { throw 'Could not list cases. Check the log for details.' }
 }
+
+Function Select-Cases {
+    param([string]$Search, [bool]$IncludeClosed)
+    $Search = "$Search".Trim()
+    @($script:CaseCache | Where-Object {
+        ($IncludeClosed -or $_.Status -notlike 'Closed*') -and
+        (-not $Search -or $_.Name.IndexOf($Search, [StringComparison]::OrdinalIgnoreCase) -ge 0)
+    } | Sort-Object Name)
+}
+
+Function Update-CasesGrid {
+    $shown = @(Select-Cases -Search $TxtCases_Search.Text -IncludeClosed ([bool]$ChkCases_Closed.IsChecked))
+    $GridCases.ItemsSource = $shown
+    $TxtCases_Count.Text = '{0} of {1} cases shown' -f $shown.Count, $script:CaseCache.Count
+}
+
+# Loads every case into the cache; $Then runs on the UI thread afterwards
+Function Start-CaseLoad {
+    param([scriptblock]$Then)
+    $script:AfterCaseLoad = $Then
+    Start-CaseAction -Action $LoadCasesAction -SuccessStatus '' -OnSuccess {
+        param($out)
+        $script:CaseCache = @($out)
+        Update-CasesGrid
+        Set-Status ('Loaded {0} cases' -f $script:CaseCache.Count)
+        if ($script:AfterCaseLoad) { $next = $script:AfterCaseLoad; $script:AfterCaseLoad = $null; & $next }
+    }
+}
+
+# Opens the picker and appends the chosen case names to $Target (one per line, no duplicates)
+Function Show-CasePicker {
+    param([System.Windows.Controls.TextBox]$Target)
+    if ($script:CaseCache.Count -eq 0) {
+        $script:PickerTarget = $Target
+        Start-CaseLoad -Then { Show-CasePicker -Target $script:PickerTarget }
+        return
+    }
+    # Picker controls are script-scoped so the event handlers below can always reach them
+    $script:Picker = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader ([xml]$pickerXaml)))
+    $script:Picker.Owner = $window
+    $script:PickSearch = $script:Picker.FindName('TxtPick_Search')
+    $script:PickClosed = $script:Picker.FindName('ChkPick_Closed')
+    $script:PickGrid   = $script:Picker.FindName('GridPick')
+    $script:PickCount  = $script:Picker.FindName('TxtPick_Count')
+    Initialize-Grid -Grid $script:PickGrid -Columns 'Name','Type','Status','Created' -FillColumn 'Name'
+
+    $refresh = {
+        $shown = @(Select-Cases -Search $script:PickSearch.Text -IncludeClosed ([bool]$script:PickClosed.IsChecked))
+        $script:PickGrid.ItemsSource = $shown
+        $script:PickCount.Text = '{0} of {1} cases shown' -f $shown.Count, $script:CaseCache.Count
+    }
+    & $refresh
+    $script:PickSearch.Add_TextChanged($refresh)
+    $script:PickClosed.Add_Checked($refresh)
+    $script:PickClosed.Add_Unchecked($refresh)
+    $script:Picker.FindName('BtnPick_Ok').Add_Click({ $script:Picker.DialogResult = $true })
+    $script:PickGrid.Add_MouseDoubleClick({ if ($script:PickGrid.SelectedItem) { $script:Picker.DialogResult = $true } })
+    $script:Picker.Add_ContentRendered({ $script:PickSearch.Focus() | Out-Null })
+
+    if ($script:Picker.ShowDialog() -and $script:PickGrid.SelectedItems.Count -gt 0) {
+        $names = @(Parse-Cases -CasesMultiline $Target.Text) + @($script:PickGrid.SelectedItems | ForEach-Object { $_.Name })
+        $Target.Text = (@($names | Select-Object -Unique) -join "`r`n")
+    }
+}
+
+$TxtCases_Search.Add_TextChanged({ Update-CasesGrid })
+$ChkCases_Closed.Add_Checked({ Update-CasesGrid })
+$ChkCases_Closed.Add_Unchecked({ Update-CasesGrid })
 
 # ------------------ Banner: Base64/DataURI/File Loader (robust) ------------------
 Function Normalize-Base64 {
@@ -447,26 +712,26 @@ Function Set-HeaderBanner {
         [int]$DecodePixelHeight = 80
     )
     try {
-        # Base64 → bytes OR file path
-        if (Test-Path $InputData -PathType Leaf) {
-            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $InputData))
+        # Base64 -> bytes OR file path
+        if ($InputData.Length -lt 260 -and (Test-Path -LiteralPath $InputData -PathType Leaf)) {
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $InputData))
         } else {
             $b64 = $InputData.Trim() -replace '^(data:image\/png;base64,)', '' -replace '\s',''
             $bytes = [Convert]::FromBase64String($b64)
         }
 
-        # Always load PNG via temp file
-        $tmp = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), ('banner_{0}.png' -f ([guid]::NewGuid().ToString('N'))))
-        [System.IO.File]::WriteAllBytes($tmp, $bytes)
-
-        # Load via URI – most reliable method
-        $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
-        $bmp.BeginInit()
-        $bmp.UriSource = New-Object System.Uri($tmp)
-        if ($DecodePixelHeight -gt 0) { $bmp.DecodePixelHeight = $DecodePixelHeight }
-        $bmp.CacheOption = 'OnLoad'
-        $bmp.EndInit()
-        $bmp.Freeze()
+        # Decode from memory; OnLoad reads the whole stream so it can be closed straight away
+        $stream = New-Object System.IO.MemoryStream(,$bytes)
+        try {
+            $bmp = New-Object System.Windows.Media.Imaging.BitmapImage
+            $bmp.BeginInit()
+            $bmp.StreamSource = $stream
+            if ($DecodePixelHeight -gt 0) { $bmp.DecodePixelHeight = $DecodePixelHeight }
+            $bmp.CacheOption = 'OnLoad'
+            $bmp.EndInit()
+            $bmp.Freeze()
+        }
+        finally { $stream.Dispose() }
 
         $HeaderBanner.Source = $bmp
     }
@@ -485,141 +750,183 @@ Set-HeaderBanner -InputData $bannerBase64 -DecodePixelHeight 80
 
 # ------------------ Button handlers ------------------
 # Each handler validates input on the UI thread, then hands the cmdlet work to Start-CaseAction.
+Function Show-InputError($message) {
+    [System.Windows.MessageBox]::Show($message,'Input Error','OK','Error') | Out-Null
+    Set-Status 'Failed' 'Red'
+}
+Function Get-CasesInput([System.Windows.Controls.TextBox]$Box) {
+    $cases = @(Parse-Cases -CasesMultiline $Box.Text)
+    if ($cases.Count -eq 0) { throw 'Please enter one or more case names / ECM references.' }
+    [string[]]$cases
+}
+
 $BtnConnect.Add_Click({
     Start-CaseAction -SuccessStatus '' -Action {
         Connect-Compliance
     }
 })
 
+# Picker and save buttons
+$BtnAdd_Pick.Add_Click({ Show-CasePicker -Target $TxtAdd_Cases })
+$BtnRem_Pick.Add_Click({ Show-CasePicker -Target $TxtRem_Cases })
+$BtnExport_Pick.Add_Click({ Show-CasePicker -Target $TxtExport_Cases })
+$BtnClose_Pick.Add_Click({ Show-CasePicker -Target $TxtClose_Cases })
+$BtnDelete_Pick.Add_Click({ Show-CasePicker -Target $TxtDelete_Cases })
+
+$BtnCases_Save.Add_Click({ Save-Results -Grid $GridCases_Results -Label 'ReopenCases' })
+$BtnAdd_Save.Add_Click({ Save-Results -Grid $GridAdd_Results -Label 'AddReviewers' })
+$BtnRem_Save.Add_Click({ Save-Results -Grid $GridRem_Results -Label 'RemoveReviewers' })
+$BtnExport_Save.Add_Click({ Save-Results -Grid $GridExport_Results -Label 'ExportCasePermissions' })
+$BtnClose_Save.Add_Click({ Save-Results -Grid $GridClose_Results -Label 'CloseCases' })
+$BtnDelete_Save.Add_Click({ Save-Results -Grid $GridDelete_Results -Label 'DeleteCases' })
+
+# Cases tab
+$BtnCases_Refresh.Add_Click({ Start-CaseLoad })
+
+$BtnCases_Copy.Add_Click({
+    $names = @($GridCases.SelectedItems | ForEach-Object { $_.Name })
+    if ($names.Count -eq 0) { Show-InputError 'Select one or more cases first.'; return }
+    [System.Windows.Clipboard]::SetText($names -join "`r`n")
+    Set-Status ('Copied {0} case names' -f $names.Count)
+})
+
+$BtnCases_Reopen.Add_Click({
+    $selected = @($GridCases.SelectedItems | Where-Object { $_.Status -like 'Closed*' })
+    if ($selected.Count -eq 0) { Show-InputError 'Select one or more closed cases to reopen.'; return }
+    $targets = @($selected | ForEach-Object { @{ Name = $_.Name; Identity = $_.Identity } })
+    Start-CaseAction -ResultsGrid $GridCases_Results -Arguments @{ Targets = $targets } -OnSuccess { Start-CaseLoad } -Action {
+        param([object[]]$Targets)
+        Connect-Compliance
+        foreach ($t in $Targets) {
+            try { Set-ComplianceCase -Identity $t.Identity -Reopen -Confirm:$false -ErrorAction Stop; Write-Result -Case $t.Name -Action 'Reopen case' -Result Success }
+            catch { Write-Result -Case $t.Name -Action 'Reopen case' -Result Failed -Detail $_.Exception.Message }
+        }
+    }
+})
+
 $BtnAdd_Run.Add_Click({
     try {
-        $case = $TxtAdd_Case.Text.Trim(); if (-not $case) { throw 'Please enter a Case ID.' }
-        $emails = Parse-Emails -EmailsMultiline $TxtAdd_Emails.Text; if (-not $emails -or $emails.Count -eq 0) { throw 'Please enter at least one reviewer email.' }
-        Start-CaseAction -Output $TxtAdd_Out -Arguments @{ Case = $case; Emails = [string[]]$emails } -Action {
-            param([string]$Case, [string[]]$Emails)
-            Connect-Compliance
+        $cases = Get-CasesInput $TxtAdd_Cases
+        $emails = @(Parse-Emails -EmailsMultiline $TxtAdd_Emails.Text); if ($emails.Count -eq 0) { throw 'Please enter at least one reviewer email.' }
+    } catch { Show-InputError $_.Exception.Message; return }
+
+    Start-CaseAction -ResultsGrid $GridAdd_Results -Arguments @{ Cases = $cases; Emails = [string[]]$emails } -Action {
+        param([string[]]$Cases, [string[]]$Emails)
+        Connect-Compliance
+        foreach ($case in $Cases) {
             foreach ($m in $Emails) {
-                try { Add-ComplianceCaseMember -Case $Case -Member $m -ErrorAction Stop; Write-Out ("Added {0} to {1}" -f $m,$Case) }
-                catch { Write-Out ("Failed adding {0} to {1}: {2}" -f $m,$Case,$_.Exception.Message) 'ERROR' }
+                try { Add-ComplianceCaseMember -Case $case -Member $m -ErrorAction Stop; Write-Result -Case $case -Member $m -Action 'Add reviewer' -Result Success }
+                catch { Write-Result -Case $case -Member $m -Action 'Add reviewer' -Result Failed -Detail $_.Exception.Message }
             }
         }
-    } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null; Set-Status 'Failed' 'Red' }
+    }
 })
 
 $BtnExport_Run.Add_Click({
-    try {
-        $cases = Parse-Cases -CasesMultiline $TxtExport_Cases.Text; if (-not $cases -or $cases.Count -eq 0) { throw 'Please enter one or more Case IDs.' }
-        Start-CaseAction -Output $TxtExport_Out -Arguments @{ Cases = [string[]]$cases } -Action {
-            param([string[]]$Cases)
-            Connect-Compliance
-            foreach ($case in $Cases) {
-                try {
-                    $outFile = Join-Path $logDir ("AdvancedDiscovery_CaseMembers_{0}.csv" -f $case)
-                    $members = Get-ComplianceCaseMember -Case $case -ErrorAction Stop | Select-Object Name, PrimarySmtpAddress
-                    $members | Export-Csv -NoTypeInformation -Path $outFile -Encoding UTF8
-                    Write-Out ("Exported {0} members for {1} -> {2}" -f ($members.Count), $case, $outFile)
-                } catch { Write-Out ("Export failed for {0}: {1}" -f $case, $_.Exception.Message) 'ERROR' }
-            }
+    try { $cases = Get-CasesInput $TxtExport_Cases } catch { Show-InputError $_.Exception.Message; return }
+
+    Start-CaseAction -ResultsGrid $GridExport_Results -Arguments @{ Cases = $cases } -Action {
+        param([string[]]$Cases)
+        Connect-Compliance
+        foreach ($case in $Cases) {
+            try {
+                $outFile = Join-Path $logDir ("AdvancedDiscovery_CaseMembers_{0}.csv" -f (ConvertTo-SafeFileName $case))
+                $members = @(Get-ComplianceCaseMember -Case $case -ErrorAction Stop | Select-Object Name, PrimarySmtpAddress)
+                $members | Export-Csv -NoTypeInformation -LiteralPath $outFile -Encoding UTF8
+                Write-Result -Case $case -Action 'Export case permissions' -Result Success -Detail ("{0} members -> {1}" -f $members.Count, $outFile)
+            } catch { Write-Result -Case $case -Action 'Export case permissions' -Result Failed -Detail $_.Exception.Message }
         }
-    } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null; Set-Status 'Failed' 'Red' }
+    }
 })
 
 $BtnRem_Run.Add_Click({
     try {
-        $cases = Parse-Cases -CasesMultiline $TxtRem_Cases.Text
-        $emails = Parse-Emails -EmailsMultiline $TxtRem_Emails.Text
+        $cases = Get-CasesInput $TxtRem_Cases
+        $emails = @(Parse-Emails -EmailsMultiline $TxtRem_Emails.Text)
         $replacement = $TxtRem_Replacement.Text.Trim()
-
-        if (-not $cases -or $cases.Count -eq 0) { throw 'Please enter one or more Case IDs.' }
         if (-not $replacement) { throw 'Please enter a replacement reviewer email.' }
+    } catch { Show-InputError $_.Exception.Message; return }
 
-        Start-CaseAction -Output $TxtRem_Out -Arguments @{ Cases = [string[]]$cases; Emails = [string[]]$emails; Replacement = $replacement } -Action {
-            param([string[]]$Cases, [string[]]$Emails, [string]$Replacement)
-            Connect-Compliance
+    Start-CaseAction -ResultsGrid $GridRem_Results -Arguments @{ Cases = $cases; Emails = [string[]]$emails; Replacement = $replacement } -Action {
+        param([string[]]$Cases, [string[]]$Emails, [string]$Replacement)
+        Connect-Compliance
 
-            foreach ($case in $Cases) {
-                # Ensure replacement is present first
+        foreach ($case in $Cases) {
+            # Ensure replacement is present first
+            try {
+                Add-ComplianceCaseMember -Case $case -Member $Replacement -ErrorAction SilentlyContinue
+                Write-Result -Case $case -Member $Replacement -Action 'Add replacement' -Result Info -Detail 'Added, or already a member'
+            }
+            catch {
+                Write-Result -Case $case -Member $Replacement -Action 'Add replacement' -Result Failed -Detail $_.Exception.Message
+            }
+
+            # Determine targets to remove
+            $targets = $null
+            if ($Emails -and $Emails.Count -gt 0) {
+                # Targeted removal (exclude replacement if included)
+                $targets = $Emails | Where-Object { $_ -and ($_ -ine $Replacement) }
+            } else {
+                # Remove ALL current members except the replacement
                 try {
-                    Add-ComplianceCaseMember -Case $case -Member $Replacement -ErrorAction SilentlyContinue
-                    Write-Out ("Ensured replacement '{0}' is a member of {1}" -f $Replacement,$case)
+                    $targets = @(Get-CaseMemberEmails -Case $case -ExcludeEmail $Replacement)
+                    if ($targets.Count -eq 0) {
+                        Write-Result -Case $case -Action 'Remove reviewers' -Result Info -Detail 'No removable members found (after excluding replacement)'
+                        continue
+                    } else {
+                        Write-Result -Case $case -Action 'Remove reviewers' -Result Info -Detail ('Removing all {0} current members except the replacement' -f $targets.Count)
+                    }
                 }
                 catch {
-                    Write-Out ("Could not ensure replacement on {0}: {1}" -f $case,$_.Exception.Message) 'ERROR'
+                    Write-Result -Case $case -Action 'Remove reviewers' -Result Failed -Detail ("Failed to enumerate members: {0}" -f $_)
+                    continue
                 }
+            }
 
-                # Determine targets to remove
-                $targets = $null
-                if ($Emails -and $Emails.Count -gt 0) {
-                    # Targeted removal (exclude replacement if included)
-                    $targets = $Emails | Where-Object { $_ -and ($_ -ine $Replacement) }
-                } else {
-                    # Remove ALL current members except the replacement
-                    try {
-                        $targets = Get-CaseMemberEmails -Case $case -ExcludeEmail $Replacement
-                        if (-not $targets -or $targets.Count -eq 0) {
-                            Write-Out ("No removable members found for case {0} (after excluding replacement)." -f $case)
-                            continue
-                        } else {
-                            Write-Out ("Removing ALL current members from case {0} (excluding replacement)." -f $case)
-                        }
-                    }
-                    catch {
-                        Write-Out ("Failed to enumerate members for {0}: {1}" -f $case, $_) 'ERROR'
-                        continue
-                    }
+            foreach ($m in $targets) {
+                if ($m -ieq $Replacement) {
+                    Write-Result -Case $case -Member $m -Action 'Remove reviewer' -Result Skipped -Detail 'Replacement reviewer is kept'
+                    continue
                 }
-
-                foreach ($m in $targets) {
-                    if ($m -ieq $Replacement) {
-                        Write-Out ("Skipping removal of replacement '{0}' on {1}" -f $Replacement,$case)
-                        continue
-                    }
-                    try {
-                        Remove-ComplianceCaseMember -Case $case -Member $m -Confirm:$false -ErrorAction Stop
-                        Write-Out ("Removed {0} from {1}" -f $m,$case)
-                    }
-                    catch {
-                        Write-Out ("Failed removing {0} from {1}: {2}" -f $m,$case,$_.Exception.Message) 'ERROR'
-                    }
+                try {
+                    Remove-ComplianceCaseMember -Case $case -Member $m -Confirm:$false -ErrorAction Stop
+                    Write-Result -Case $case -Member $m -Action 'Remove reviewer' -Result Success
+                }
+                catch {
+                    Write-Result -Case $case -Member $m -Action 'Remove reviewer' -Result Failed -Detail $_.Exception.Message
                 }
             }
         }
-    }
-    catch {
-        [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null
-        Set-Status 'Failed' 'Red'
     }
 })
 
 $BtnClose_Run.Add_Click({
-    try {
-        $cases = Parse-Cases -CasesMultiline $TxtClose_Cases.Text; if (-not $cases -or $cases.Count -eq 0) { throw 'Please enter one or more Case IDs.' }
-        Start-CaseAction -Output $TxtClose_Out -Arguments @{ Cases = [string[]]$cases } -Action {
-            param([string[]]$Cases)
-            Connect-Compliance
-            foreach ($case in $Cases) {
-                try { Set-ComplianceCase -Identity $case -Close -Confirm:$false -ErrorAction Stop; Write-Out ("Closed case: {0}" -f $case) }
-                catch { Write-Out ("Failed closing {0}: {1}" -f $case, $_.Exception.Message) 'ERROR' }
-            }
+    try { $cases = Get-CasesInput $TxtClose_Cases } catch { Show-InputError $_.Exception.Message; return }
+
+    Start-CaseAction -ResultsGrid $GridClose_Results -Arguments @{ Cases = $cases } -Action {
+        param([string[]]$Cases)
+        Connect-Compliance
+        foreach ($case in $Cases) {
+            try { Set-ComplianceCase -Identity $case -Close -Confirm:$false -ErrorAction Stop; Write-Result -Case $case -Action 'Close case' -Result Success }
+            catch { Write-Result -Case $case -Action 'Close case' -Result Failed -Detail $_.Exception.Message }
         }
-    } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null; Set-Status 'Failed' 'Red' }
+    }
 })
 
 $BtnDelete_Run.Add_Click({
     $prompt = [System.Windows.MessageBox]::Show('This will DELETE the listed cases. This action is irreversible. Continue?','Confirm Delete','YesNo','Warning')
     if ($prompt -ne 'Yes') { return }
 
-    try {
-        $cases = Parse-Cases -CasesMultiline $TxtDelete_Cases.Text; if (-not $cases -or $cases.Count -eq 0) { throw 'Please enter one or more Case IDs.' }
-        Start-CaseAction -Output $TxtDelete_Out -Arguments @{ Cases = [string[]]$cases } -Action {
-            param([string[]]$Cases)
-            Connect-Compliance
-            foreach ($case in $Cases) {
-                try { Remove-ComplianceCase -Identity $case -Confirm:$false -ErrorAction Stop; Write-Out ("Deleted case: {0}" -f $case) }
-                catch { Write-Out ("Failed deleting {0}: {1}" -f $case, $_.Exception.Message) 'ERROR' }
-            }
+    try { $cases = Get-CasesInput $TxtDelete_Cases } catch { Show-InputError $_.Exception.Message; return }
+
+    Start-CaseAction -ResultsGrid $GridDelete_Results -Arguments @{ Cases = $cases } -Action {
+        param([string[]]$Cases)
+        Connect-Compliance
+        foreach ($case in $Cases) {
+            try { Remove-ComplianceCase -Identity $case -Confirm:$false -ErrorAction Stop; Write-Result -Case $case -Action 'Delete case' -Result Success }
+            catch { Write-Result -Case $case -Action 'Delete case' -Result Failed -Detail $_.Exception.Message }
         }
-    } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'Input Error','OK','Error') | Out-Null; Set-Status 'Failed' 'Red' }
+    }
 })
 
 # Closing mid-action stops the running pipeline rather than leaving it running unseen
