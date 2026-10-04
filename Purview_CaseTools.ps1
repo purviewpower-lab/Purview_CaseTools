@@ -383,11 +383,32 @@ $ThemeXaml = @'
     </Style>
 
     <!-- Slim scrollbars that follow the theme (no arrow buttons) -->
-    <Style x:Key="ScrollThumb" TargetType="Thumb">
+    <Style x:Key="ScrollThumbV" TargetType="Thumb">
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Thumb">
-            <Border x:Name="ThumbBd" Margin="3" CornerRadius="3" Background="{DynamicResource InputBorder}"/>
+            <Border Background="Transparent">
+              <Border x:Name="ThumbBd" Margin="3,0" CornerRadius="3" Background="{DynamicResource InputBorder}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ThumbBd" Property="Background" Value="{DynamicResource InputHoverBorder}"/>
+              </Trigger>
+              <Trigger Property="IsDragging" Value="True">
+                <Setter TargetName="ThumbBd" Property="Background" Value="{DynamicResource InputHoverBorder}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="ScrollThumbH" TargetType="Thumb">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Thumb">
+            <Border Background="Transparent">
+              <Border x:Name="ThumbBd" Margin="0,3" CornerRadius="3" Background="{DynamicResource InputBorder}"/>
+            </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="ThumbBd" Property="Background" Value="{DynamicResource InputHoverBorder}"/>
@@ -421,7 +442,7 @@ $ThemeXaml = @'
             <RepeatButton Style="{StaticResource ScrollPage}" Command="{x:Static ScrollBar.PageDownCommand}"/>
           </Track.IncreaseRepeatButton>
           <Track.Thumb>
-            <Thumb Style="{StaticResource ScrollThumb}"/>
+            <Thumb Style="{StaticResource ScrollThumbV}"/>
           </Track.Thumb>
         </Track>
       </Border>
@@ -436,7 +457,7 @@ $ThemeXaml = @'
             <RepeatButton Style="{StaticResource ScrollPage}" Command="{x:Static ScrollBar.PageRightCommand}"/>
           </Track.IncreaseRepeatButton>
           <Track.Thumb>
-            <Thumb Style="{StaticResource ScrollThumb}"/>
+            <Thumb Style="{StaticResource ScrollThumbH}"/>
           </Track.Thumb>
         </Track>
       </Border>
@@ -805,7 +826,7 @@ $mainXaml = @'
           <StackPanel Grid.Row="2" Margin="0,0,0,16">
             <StackPanel Orientation="Horizontal">
               <TextBlock Text="Replacement reviewer" Style="{StaticResource FieldLabel}" Margin="0,0,10,0" VerticalAlignment="Center"/>
-              <TextBox x:Name="TxtRem_Replacement" Width="300" VerticalAlignment="Center" ToolTip="Cases must have at least 1 member, so this person is added before anyone is removed."/>
+              <TextBox x:Name="TxtRem_Replacement" Width="280" VerticalAlignment="Center" ToolTip="Cases must have at least 1 member, so this person is added before anyone is removed."/>
               <Button x:Name="BtnRem_Run" Style="{StaticResource AccentButton}" Tag="&#xE8F8;" Content="Remove + Replace" ToolTip="Ctrl+Enter" Margin="12,0,0,0"/>
             </StackPanel>
             <TextBlock x:Name="HintRem_Replacement" Style="{StaticResource Hint}" Visibility="Collapsed"/>
@@ -1077,6 +1098,9 @@ Function Set-Theme {
         $brush.Freeze()
         $Target.Resources[$key] = $brush
     }
+    # The slim scroll bars have no arrow buttons; WPF sizes the smallest thumb at half this value
+    $Target.Resources[[System.Windows.SystemParameters]::VerticalScrollBarButtonHeightKey] = [double]40
+    $Target.Resources[[System.Windows.SystemParameters]::HorizontalScrollBarButtonWidthKey] = [double]40
     if ($Target -eq $window) {
         $ThemeToggle.Content = if ($script:ThemeMode -eq 'System') { 'Theme: System ({0})' -f $name } else { 'Theme: {0}' -f $name }
     }
@@ -1114,20 +1138,27 @@ Function Restore-Settings {
     param($Settings)
     if (-not $Settings) { return 0 }
     if ($Settings.Theme -in 'System', 'Light', 'Dark') { $script:ThemeMode = [string]$Settings.Theme }
-    $workArea = [System.Windows.SystemParameters]::WorkArea
-    if ((Test-Number $Settings.Width) -and (Test-Number $Settings.Height)) {
-        $window.Width  = [Math]::Max($window.MinWidth,  [Math]::Min([double]$Settings.Width,  $workArea.Width))
-        $window.Height = [Math]::Max($window.MinHeight, [Math]::Min([double]$Settings.Height, $workArea.Height))
-    }
+    $screen = New-Object System.Windows.Rect([System.Windows.SystemParameters]::VirtualScreenLeft, [System.Windows.SystemParameters]::VirtualScreenTop, [System.Windows.SystemParameters]::VirtualScreenWidth, [System.Windows.SystemParameters]::VirtualScreenHeight)
+    $haveSize = (Test-Number $Settings.Width) -and (Test-Number $Settings.Height)
+    $width  = if ($haveSize) { [Math]::Max($window.MinWidth,  [Math]::Min([double]$Settings.Width,  $screen.Width)) }  else { $window.Width }
+    $height = if ($haveSize) { [Math]::Max($window.MinHeight, [Math]::Min([double]$Settings.Height, $screen.Height)) } else { $window.Height }
+    $restored = $false
     if ((Test-Number $Settings.Left) -and (Test-Number $Settings.Top)) {
-        $screen = New-Object System.Windows.Rect([System.Windows.SystemParameters]::VirtualScreenLeft, [System.Windows.SystemParameters]::VirtualScreenTop, [System.Windows.SystemParameters]::VirtualScreenWidth, [System.Windows.SystemParameters]::VirtualScreenHeight)
-        $topLeft     = New-Object System.Windows.Point(([double]$Settings.Left + 20), ([double]$Settings.Top + 10))
-        $bottomRight = New-Object System.Windows.Point(([double]$Settings.Left + $window.Width - 20), ([double]$Settings.Top + $window.Height - 10))
+        $left = [double]$Settings.Left; $top = [double]$Settings.Top
+        $topLeft     = New-Object System.Windows.Point(($left + 20), ($top + 10))
+        $bottomRight = New-Object System.Windows.Point(($left + $width - 20), ($top + $height - 10))
         if ($screen.Contains($topLeft) -and $screen.Contains($bottomRight)) {
             $window.WindowStartupLocation = 'Manual'
-            $window.Left = [double]$Settings.Left
-            $window.Top  = [double]$Settings.Top
+            $window.Left = $left; $window.Top = $top
+            $window.Width = $width; $window.Height = $height
+            $restored = $true
         }
+    }
+    # Otherwise the window opens centred on the main screen, so fit it to that screen
+    if ($haveSize -and -not $restored) {
+        $workArea = [System.Windows.SystemParameters]::WorkArea
+        $window.Width  = [Math]::Max($window.MinWidth,  [Math]::Min([double]$Settings.Width,  $workArea.Width))
+        $window.Height = [Math]::Max($window.MinHeight, [Math]::Min([double]$Settings.Height, $workArea.Height))
     }
     if ($Settings.Maximized -eq $true) { $window.WindowState = 'Maximized' }
     $page = 0
