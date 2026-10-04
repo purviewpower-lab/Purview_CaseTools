@@ -1094,7 +1094,9 @@ Function Set-Theme {
     $name = if ($script:ThemeMode -eq 'System') { Get-WindowsAppTheme } else { $script:ThemeMode }
     $palette = $Palettes[$name]
     foreach ($key in $palette.Keys) {
-        $brush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($palette[$key]))
+        # ::new rather than New-Object: New-Object wraps the brush in a PSObject, and the
+        # resource dictionary would store that wrapper, which WPF rejects as a Brush
+        $brush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color][System.Windows.Media.ColorConverter]::ConvertFromString($palette[$key]))
         $brush.Freeze()
         $Target.Resources[$key] = $brush
     }
