@@ -182,6 +182,7 @@ $ThemeXaml = @'
     </Style>
     <Style x:Key="FieldLabel" TargetType="TextBlock">
       <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
       <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
       <Setter Property="Margin" Value="0,0,0,6"/>
     </Style>
@@ -195,6 +196,22 @@ $ThemeXaml = @'
       <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
       <Setter Property="VerticalAlignment" Value="Center"/>
       <Setter Property="ToolTip" Value="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+      <Style.Triggers>
+        <Trigger Property="Text" Value="">
+          <Setter Property="ToolTip" Value="{x:Null}"/>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
+
+    <!-- Dotted focus rectangle, shown only when focus arrives from the keyboard -->
+    <Style x:Key="KeyboardFocus">
+      <Setter Property="Control.Template">
+        <Setter.Value>
+          <ControlTemplate>
+            <Rectangle Margin="1" Stroke="{DynamicResource FocusBorder}" StrokeThickness="1" StrokeDashArray="1 2" SnapsToDevicePixels="True"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <!-- Card panels -->
@@ -275,7 +292,7 @@ $ThemeXaml = @'
     <Style x:Key="LinkButton" TargetType="Button">
       <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocus}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
@@ -303,7 +320,7 @@ $ThemeXaml = @'
         <Setter.Value>
           <ControlTemplate TargetType="TextBox">
             <Border x:Name="Bd" CornerRadius="6" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" SnapsToDevicePixels="True">
-              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" Focusable="False" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
+              <ScrollViewer x:Name="PART_ContentHost" Focusable="False" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Hidden"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
@@ -328,12 +345,116 @@ $ThemeXaml = @'
     </Style>
     <Style TargetType="CheckBox">
       <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
-      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <StackPanel Orientation="Horizontal" Background="Transparent">
+              <Border x:Name="Box" Width="16" Height="16" CornerRadius="3" BorderThickness="1" Background="{DynamicResource InputBg}" BorderBrush="{DynamicResource InputBorder}" VerticalAlignment="Center">
+                <TextBlock x:Name="Mark" Text="&#xE73E;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="11" Foreground="{DynamicResource AccentText}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+              </Border>
+              <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource InputHoverBorder}"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Box" Property="Background" Value="{DynamicResource Accent}"/>
+                <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+                <Setter TargetName="Mark" Property="Visibility" Value="Visible"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="Box" Property="BorderBrush" Value="{DynamicResource FocusBorder}"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.5"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
     <Style TargetType="ProgressBar">
       <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
-      <Setter Property="Background" Value="{DynamicResource GridLine}"/>
+      <Setter Property="Background" Value="{DynamicResource InputBorder}"/>
       <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+
+    <!-- Slim scrollbars that follow the theme (no arrow buttons) -->
+    <Style x:Key="ScrollThumb" TargetType="Thumb">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Thumb">
+            <Border x:Name="ThumbBd" Margin="3" CornerRadius="3" Background="{DynamicResource InputBorder}"/>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ThumbBd" Property="Background" Value="{DynamicResource InputHoverBorder}"/>
+              </Trigger>
+              <Trigger Property="IsDragging" Value="True">
+                <Setter TargetName="ThumbBd" Property="Background" Value="{DynamicResource InputHoverBorder}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="ScrollPage" TargetType="RepeatButton">
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="IsTabStop" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RepeatButton">
+            <Border Background="Transparent"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <ControlTemplate x:Key="VerticalScroll" TargetType="ScrollBar">
+      <Border Background="{TemplateBinding Background}">
+        <Track x:Name="PART_Track" IsDirectionReversed="True">
+          <Track.DecreaseRepeatButton>
+            <RepeatButton Style="{StaticResource ScrollPage}" Command="{x:Static ScrollBar.PageUpCommand}"/>
+          </Track.DecreaseRepeatButton>
+          <Track.IncreaseRepeatButton>
+            <RepeatButton Style="{StaticResource ScrollPage}" Command="{x:Static ScrollBar.PageDownCommand}"/>
+          </Track.IncreaseRepeatButton>
+          <Track.Thumb>
+            <Thumb Style="{StaticResource ScrollThumb}"/>
+          </Track.Thumb>
+        </Track>
+      </Border>
+    </ControlTemplate>
+    <ControlTemplate x:Key="HorizontalScroll" TargetType="ScrollBar">
+      <Border Background="{TemplateBinding Background}">
+        <Track x:Name="PART_Track" IsDirectionReversed="False">
+          <Track.DecreaseRepeatButton>
+            <RepeatButton Style="{StaticResource ScrollPage}" Command="{x:Static ScrollBar.PageLeftCommand}"/>
+          </Track.DecreaseRepeatButton>
+          <Track.IncreaseRepeatButton>
+            <RepeatButton Style="{StaticResource ScrollPage}" Command="{x:Static ScrollBar.PageRightCommand}"/>
+          </Track.IncreaseRepeatButton>
+          <Track.Thumb>
+            <Thumb Style="{StaticResource ScrollThumb}"/>
+          </Track.Thumb>
+        </Track>
+      </Border>
+    </ControlTemplate>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Template" Value="{StaticResource VerticalScroll}"/>
+      <Setter Property="Width" Value="12"/>
+      <Setter Property="MinWidth" Value="12"/>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Template" Value="{StaticResource HorizontalScroll}"/>
+          <Setter Property="Width" Value="Auto"/>
+          <Setter Property="MinWidth" Value="0"/>
+          <Setter Property="Height" Value="12"/>
+          <Setter Property="MinHeight" Value="12"/>
+        </Trigger>
+      </Style.Triggers>
     </Style>
 
     <!-- Left-hand navigation: Tag holds the icon glyph -->
@@ -347,7 +468,7 @@ $ThemeXaml = @'
       <Setter Property="Padding" Value="12,9"/>
       <Setter Property="Margin" Value="8,2"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocus}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ListBoxItem">
@@ -426,7 +547,7 @@ $ThemeXaml = @'
     </Style>
     <Style TargetType="DataGridCell">
       <Setter Property="BorderThickness" Value="0"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource KeyboardFocus}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="DataGridCell">
@@ -510,7 +631,7 @@ $mainXaml = @'
           <Border CornerRadius="12" Background="#33000000" Padding="10,5" Margin="0,0,12,0" VerticalAlignment="Center">
             <StackPanel Orientation="Horizontal">
               <Ellipse x:Name="ConnDot" Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="#9CA3AF"/>
-              <TextBlock x:Name="TxtConn" Text="Not connected" Foreground="#FFFFFF" VerticalAlignment="Center"/>
+              <TextBlock x:Name="TxtConn" Text="Not connected" Foreground="#FFFFFF" VerticalAlignment="Center" MaxWidth="320" TextTrimming="CharacterEllipsis"/>
             </StackPanel>
           </Border>
           <Button x:Name="BtnConnect" Style="{StaticResource HeaderButton}" Tag="&#xE703;" Content="Connect" ToolTip="Sign in to Security &amp; Compliance and load the case list"/>
@@ -657,7 +778,7 @@ $mainXaml = @'
           </Grid.RowDefinitions>
           <StackPanel Margin="0,0,0,16">
             <TextBlock Text="Remove Reviewers" Style="{StaticResource PageTitle}"/>
-            <TextBlock Text="Remove reviewers from one or more cases. The replacement is added first, because every case needs at least one member." Style="{StaticResource PageSubtitle}"/>
+            <TextBlock Text="Remove reviewers from cases. The replacement is added first, as every case needs at least one member." Style="{StaticResource PageSubtitle}"/>
           </StackPanel>
           <Border Grid.Row="1" Style="{StaticResource Card}">
             <Grid>
@@ -666,32 +787,28 @@ $mainXaml = @'
                 <ColumnDefinition Width="20"/>
                 <ColumnDefinition Width="*"/>
               </Grid.ColumnDefinitions>
-              <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-              </Grid.RowDefinitions>
               <StackPanel>
                 <DockPanel Margin="0,0,0,6">
                   <Button x:Name="BtnRem_Pick" DockPanel.Dock="Right" Style="{StaticResource SubtleButton}" Tag="&#xE710;" Content="Pick Cases..." Padding="8,3"/>
                   <TextBlock Text="Case Name / ECM Reference (one per line)" Style="{StaticResource FieldLabel}" Margin="0" VerticalAlignment="Center"/>
                 </DockPanel>
-                <TextBox x:Name="TxtRem_Cases" Height="96" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+                <TextBox x:Name="TxtRem_Cases" Height="80" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
                 <TextBlock x:Name="HintRem_Cases" Style="{StaticResource Hint}"/>
               </StackPanel>
               <StackPanel Grid.Column="2">
                 <TextBlock Text="Reviewers to remove (one per line)" Style="{StaticResource FieldLabel}" Margin="0,4,0,8"/>
-                <TextBox x:Name="TxtRem_Emails" Height="96" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
-                <TextBlock x:Name="HintRem_Emails" Style="{StaticResource Hint}" Text="Leave empty to remove all current reviewers on each case (the replacement will still be added)."/>
-              </StackPanel>
-              <StackPanel Grid.Row="1" Grid.ColumnSpan="3" Margin="0,16,0,0">
-                <TextBlock Text="Replacement reviewer (cases must have at least 1 member)" Style="{StaticResource FieldLabel}"/>
-                <TextBox x:Name="TxtRem_Replacement" Width="380" HorizontalAlignment="Left"/>
-                <TextBlock x:Name="HintRem_Replacement" Style="{StaticResource Hint}"/>
+                <TextBox x:Name="TxtRem_Emails" Height="80" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+                <TextBlock x:Name="HintRem_Emails" Style="{StaticResource Hint}" Text="Leave empty to remove everyone except the replacement."/>
               </StackPanel>
             </Grid>
           </Border>
-          <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,16">
-            <Button x:Name="BtnRem_Run" Style="{StaticResource AccentButton}" Tag="&#xE8F8;" Content="Remove + Replace" ToolTip="Ctrl+Enter"/>
+          <StackPanel Grid.Row="2" Margin="0,0,0,16">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Replacement reviewer" Style="{StaticResource FieldLabel}" Margin="0,0,10,0" VerticalAlignment="Center"/>
+              <TextBox x:Name="TxtRem_Replacement" Width="300" VerticalAlignment="Center" ToolTip="Cases must have at least 1 member, so this person is added before anyone is removed."/>
+              <Button x:Name="BtnRem_Run" Style="{StaticResource AccentButton}" Tag="&#xE8F8;" Content="Remove + Replace" ToolTip="Ctrl+Enter" Margin="12,0,0,0"/>
+            </StackPanel>
+            <TextBlock x:Name="HintRem_Replacement" Style="{StaticResource Hint}" Visibility="Collapsed"/>
           </StackPanel>
           <Border Grid.Row="3" Style="{StaticResource Card}" Padding="0" Margin="0">
             <Grid>
@@ -836,16 +953,14 @@ $mainXaml = @'
 
     <!-- Status bar: progress, last result, shortcuts, logs -->
     <Border Grid.Row="2" Background="{DynamicResource StatusBg}" BorderBrush="{DynamicResource CardBorder}" BorderThickness="0,1,0,0" Padding="16,7">
-      <DockPanel LastChildFill="False">
-        <StackPanel DockPanel.Dock="Left" Orientation="Horizontal">
-          <ProgressBar x:Name="BusyProgress" Width="160" Height="6" Margin="0,0,10,0" VerticalAlignment="Center" Visibility="Collapsed"/>
-          <TextBlock x:Name="TxtWorking" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
-          <TextBlock x:Name="TxtStatus" VerticalAlignment="Center" FontWeight="SemiBold" Margin="12,0,0,0"/>
-        </StackPanel>
-        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
-          <TextBlock Text="Ctrl+Enter runs this page  |  F5 refreshes cases  |  Ctrl+1 to 6 switch pages" Foreground="{DynamicResource TextSecondary}" FontSize="12" VerticalAlignment="Center" Margin="0,0,16,0"/>
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" Margin="16,0,0,0">
+          <TextBlock x:Name="TxtShortcuts" Text="Ctrl+Enter runs this page  |  F5 refreshes cases  |  Ctrl+1 to 6 switch pages" Foreground="{DynamicResource TextSecondary}" FontSize="12" VerticalAlignment="Center" Margin="0,0,16,0"/>
           <Button x:Name="LinkLogs" Style="{StaticResource LinkButton}" Content="Open logs folder"/>
         </StackPanel>
+        <ProgressBar x:Name="BusyProgress" DockPanel.Dock="Left" Width="160" Height="6" Margin="0,0,10,0" VerticalAlignment="Center" Visibility="Collapsed"/>
+        <TextBlock x:Name="TxtWorking" DockPanel.Dock="Left" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}" Margin="0,0,12,0"/>
+        <TextBlock x:Name="TxtStatus" VerticalAlignment="Center" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
       </DockPanel>
     </Border>
   </Grid>
@@ -877,10 +992,10 @@ $pickerXaml = @'
     <Border Grid.Row="1" Style="{StaticResource Card}" Padding="1" Margin="0">
       <DataGrid x:Name="GridPick"/>
     </Border>
-    <DockPanel Grid.Row="2" Margin="0,12,0,0" LastChildFill="False">
-      <TextBlock x:Name="TxtPick_Count" Style="{StaticResource Hint}" Margin="0" VerticalAlignment="Center"/>
+    <DockPanel Grid.Row="2" Margin="0,12,0,0">
       <Button x:Name="BtnPick_Cancel" DockPanel.Dock="Right" Content="Cancel" IsCancel="True" Margin="8,0,0,0"/>
       <Button x:Name="BtnPick_Ok" DockPanel.Dock="Right" Style="{StaticResource AccentButton}" Tag="&#xE73E;" Content="Add Selected" IsDefault="True"/>
+      <TextBlock x:Name="TxtPick_Count" Style="{StaticResource Hint}" Margin="0,0,12,0" VerticalAlignment="Center"/>
     </DockPanel>
   </Grid>
 </Window>
@@ -999,14 +1114,16 @@ Function Restore-Settings {
     param($Settings)
     if (-not $Settings) { return 0 }
     if ($Settings.Theme -in 'System', 'Light', 'Dark') { $script:ThemeMode = [string]$Settings.Theme }
+    $workArea = [System.Windows.SystemParameters]::WorkArea
     if ((Test-Number $Settings.Width) -and (Test-Number $Settings.Height)) {
-        $window.Width  = [Math]::Max($window.MinWidth,  [double]$Settings.Width)
-        $window.Height = [Math]::Max($window.MinHeight, [double]$Settings.Height)
+        $window.Width  = [Math]::Max($window.MinWidth,  [Math]::Min([double]$Settings.Width,  $workArea.Width))
+        $window.Height = [Math]::Max($window.MinHeight, [Math]::Min([double]$Settings.Height, $workArea.Height))
     }
     if ((Test-Number $Settings.Left) -and (Test-Number $Settings.Top)) {
         $screen = New-Object System.Windows.Rect([System.Windows.SystemParameters]::VirtualScreenLeft, [System.Windows.SystemParameters]::VirtualScreenTop, [System.Windows.SystemParameters]::VirtualScreenWidth, [System.Windows.SystemParameters]::VirtualScreenHeight)
-        $titleBar = New-Object System.Windows.Point(([double]$Settings.Left + 100), ([double]$Settings.Top + 20))
-        if ($screen.Contains($titleBar)) {
+        $topLeft     = New-Object System.Windows.Point(([double]$Settings.Left + 20), ([double]$Settings.Top + 10))
+        $bottomRight = New-Object System.Windows.Point(([double]$Settings.Left + $window.Width - 20), ([double]$Settings.Top + $window.Height - 10))
+        if ($screen.Contains($topLeft) -and $screen.Contains($bottomRight)) {
             $window.WindowStartupLocation = 'Manual'
             $window.Left = [double]$Settings.Left
             $window.Top  = [double]$Settings.Top
@@ -1022,6 +1139,7 @@ Function Restore-Settings {
 Function Set-Status {
     param([string]$Message, [ValidateSet('Success','Error','Neutral')][string]$Kind = 'Success')
     $TxtStatus.Text = $Message
+    $TxtStatus.ToolTip = if ($Message) { $Message } else { $null }
     $key = switch ($Kind) { 'Error' { 'DangerText' } 'Neutral' { 'TextSecondary' } default { 'SuccessText' } }
     $TxtStatus.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, $key)
 }
@@ -1051,16 +1169,15 @@ $ConnOnBrush  = New-Object System.Windows.Media.SolidColorBrush ([System.Windows
 $ConnOffBrush = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString('#9CA3AF'))
 Function Update-ConnectionText {
     if ($Shared.IsConnected) {
-        $text = 'Connected to Security & Compliance'
-        if ($Shared.Account) { $text = 'Connected as {0}' -f $Shared.Account }
-        if ($Shared.Tenant)  { $text += '  |  Tenant {0}' -f $Shared.Tenant }
-        $TxtConn.Text = $text
+        $TxtConn.Text = if ($Shared.Account) { $Shared.Account } else { 'Connected' }
+        $TxtConn.ToolTip = if ($Shared.Tenant) { 'Connected to Security & Compliance as {0}, tenant {1}' -f $Shared.Account, $Shared.Tenant } else { $null }
         $ConnDot.Fill = $ConnOnBrush
         $BtnConnect.Content = 'Refresh'
         $BtnConnect.Tag = [string][char]0xE72C
         $BtnConnect.ToolTip = 'Check the session and reload the case list'
     } else {
         $TxtConn.Text = 'Not connected'
+        $TxtConn.ToolTip = $null
         $ConnDot.Fill = $ConnOffBrush
         $BtnConnect.Content = 'Connect'
         $BtnConnect.Tag = [string][char]0xE703
@@ -1074,6 +1191,8 @@ Function Invoke-ButtonClick([System.Windows.Controls.Button]$Button) {
 }
 
 $LinkLogs.ToolTip = $logFile
+# The shortcut reminder gives way to the status text on narrow windows
+$window.Add_SizeChanged({ $TxtShortcuts.Visibility = if ($window.ActualWidth -lt 1080) { 'Collapsed' } else { 'Visible' } })
 $TxtExport_Info.Text = "Writes one CSV of members per case to $logDir."
 
 # ------------------ Navigation ------------------
@@ -1081,18 +1200,24 @@ $Pages = @($Page_Cases, $Page_Add, $Page_Rem, $Page_Export, $Page_Close, $Page_D
 $PageRunButtons = @($BtnCases_Refresh, $BtnAdd_Run, $BtnRem_Run, $BtnExport_Run, $BtnClose_Run, $BtnDelete_Run)
 $PageFirstInputs = @($TxtCases_Search, $TxtAdd_Cases, $TxtRem_Cases, $TxtExport_Cases, $TxtClose_Cases, $TxtDelete_Cases)
 
+$script:CurrentPage = 0
 $NavList.Add_SelectionChanged({
     $index = $NavList.SelectedIndex
-    if ($index -lt 0) { return }
+    # Ctrl+click on the current page clears the selection; put it back
+    if ($index -lt 0) { $NavList.SelectedIndex = $script:CurrentPage; return }
+    $script:CurrentPage = $index
     for ($i = 0; $i -lt $Pages.Count; $i++) {
         $Pages[$i].Visibility = if ($i -eq $index) { 'Visible' } else { 'Collapsed' }
     }
     Set-Status ''
-    # Focus the page's first box once it has been laid out
-    $null = $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Input, [Action]{
-        $box = $PageFirstInputs[$NavList.SelectedIndex]
-        if ($box) { $null = $box.Focus() }
-    })
+    # Focus the page's first box once it has been laid out, unless the user is moving through the list with the arrow keys
+    $fromListKeys = $NavList.IsKeyboardFocusWithin -and ([System.Windows.Input.InputManager]::Current.MostRecentInputDevice -is [System.Windows.Input.KeyboardDevice])
+    if (-not $fromListKeys) {
+        $null = $window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Input, [Action]{
+            $box = $PageFirstInputs[$NavList.SelectedIndex]
+            if ($box) { $null = $box.Focus() }
+        })
+    }
 })
 
 # ------------------ Grids ------------------
@@ -1102,6 +1227,7 @@ Function New-GridColumn {
         $col = New-Object System.Windows.Controls.DataGridTemplateColumn
         $col.CellTemplate = $Owner.FindResource($ChipTemplate)
         $col.SortMemberPath = $Header
+        $col.ClipboardContentBinding = New-Object System.Windows.Data.Binding($Header)   # template columns copy as blank otherwise
     } else {
         $col = New-Object System.Windows.Controls.DataGridTextColumn
         $col.Binding = New-Object System.Windows.Data.Binding($Header)
@@ -1274,6 +1400,7 @@ Function Start-CaseAction {
 
 # ------------------ Input checks shown as you type ------------------
 $script:CaseCache = @()
+$script:CasesLoaded = $false
 $script:CaseNameSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
 # 'a', 'b', 'c' and 2 more
@@ -1297,7 +1424,7 @@ Function Update-CaseHint {
     $cases = @(Parse-Cases -CasesMultiline $Box.Text)
     if ($cases.Count -eq 0) { Set-Hint $Box $Hint ''; return }
     $count = if ($cases.Count -eq 1) { '1 case' } else { '{0} cases' -f $cases.Count }
-    if ($script:CaseNameSet.Count -eq 0) {
+    if (-not $script:CasesLoaded) {
         Set-Hint $Box $Hint ('{0}. Connect to check the names against the case list.' -f $count)
         return
     }
@@ -1307,20 +1434,25 @@ Function Update-CaseHint {
 }
 
 Function Update-EmailHint {
-    param([System.Windows.Controls.TextBox]$Box, [System.Windows.Controls.TextBlock]$Hint, [string]$EmptyText = '')
+    param([System.Windows.Controls.TextBox]$Box, [System.Windows.Controls.TextBlock]$Hint, [string]$EmptyText = '', [string]$InvalidNote = 'these will be skipped')
     $entries = @(Split-InputList $Box.Text)
     if ($entries.Count -eq 0) { Set-Hint $Box $Hint $EmptyText; return }
     $valid = @(Parse-Emails -EmailsMultiline $Box.Text)
     $invalid = @($entries | Where-Object { $_ -notmatch $EmailPattern } | Select-Object -Unique)
     $count = if ($valid.Count -eq 1) { '1 reviewer' } else { '{0} reviewers' -f $valid.Count }
-    if ($invalid.Count -gt 0) { Set-Hint $Box $Hint ('{0}. Not valid email addresses, these will be skipped: {1}' -f $count, (Join-Preview $invalid)) 'Invalid' }
+    if ($invalid.Count -gt 0) { Set-Hint $Box $Hint ('{0}. Not valid email addresses, {1}: {2}' -f $count, $InvalidNote, (Join-Preview $invalid)) 'Invalid' }
     else { Set-Hint $Box $Hint $count }
 }
 
 Function Update-ReplacementHint {
     $text = $TxtRem_Replacement.Text.Trim()
-    if ($text -and $text -notmatch $EmailPattern) { Set-Hint $TxtRem_Replacement $HintRem_Replacement 'This does not look like an email address.' 'Invalid' }
-    else { Set-Hint $TxtRem_Replacement $HintRem_Replacement '' }
+    if ($text -and $text -notmatch $EmailPattern) {
+        Set-Hint $TxtRem_Replacement $HintRem_Replacement 'The replacement does not look like an email address.' 'Invalid'
+        $HintRem_Replacement.Visibility = 'Visible'
+    } else {
+        Set-Hint $TxtRem_Replacement $HintRem_Replacement ''
+        $HintRem_Replacement.Visibility = 'Collapsed'
+    }
 }
 
 $CaseHintFor = @{
@@ -1335,7 +1467,7 @@ foreach ($name in $CaseHintFor.Keys) {
     (Get-Variable -Name $name -ValueOnly).Add_TextChanged({ param($s, $e) Update-CaseHint $s $CaseHintFor[$s.Name] })
 }
 $TxtAdd_Emails.Add_TextChanged({ Update-EmailHint $TxtAdd_Emails $HintAdd_Emails })
-$TxtRem_Emails.Add_TextChanged({ Update-EmailHint $TxtRem_Emails $HintRem_Emails $RemEmailsEmptyText })
+$TxtRem_Emails.Add_TextChanged({ Update-EmailHint $TxtRem_Emails $HintRem_Emails $RemEmailsEmptyText 'fix these before running' })
 $TxtRem_Replacement.Add_TextChanged({ Update-ReplacementHint })
 
 # ------------------ Case list and picker ------------------
@@ -1379,7 +1511,7 @@ Function Select-Cases {
 Function Update-CasesGrid {
     $shown = @(Select-Cases -Search $TxtCases_Search.Text -IncludeClosed ([bool]$ChkCases_Closed.IsChecked))
     $GridCases.ItemsSource = $shown
-    if ($script:CaseCache.Count -gt 0) {
+    if ($script:CasesLoaded) {
         $TxtCases_Count.Text = '{0} of {1} cases shown' -f $shown.Count, $script:CaseCache.Count
     }
 }
@@ -1391,6 +1523,7 @@ Function Start-CaseLoad {
     Start-CaseAction -Action $LoadCasesAction -SuccessStatus '' -OnSuccess {
         param($out)
         $script:CaseCache = @($out)
+        $script:CasesLoaded = $true
         $script:CaseNameSet.Clear()
         foreach ($c in $script:CaseCache) {
             if ($c.Name) { $null = $script:CaseNameSet.Add($c.Name) }
@@ -1406,7 +1539,7 @@ Function Start-CaseLoad {
 # Opens the picker and appends the chosen case names to $Target (one per line, no duplicates)
 Function Show-CasePicker {
     param([System.Windows.Controls.TextBox]$Target)
-    if ($script:CaseCache.Count -eq 0) {
+    if (-not $script:CasesLoaded) {
         $script:PickerTarget = $Target
         Start-CaseLoad -Then { Show-CasePicker -Target $script:PickerTarget }
         return
@@ -1606,6 +1739,9 @@ $BtnRem_Run.Add_Click({
     try {
         $cases = Get-CasesInput $TxtRem_Cases
         $emails = @(Parse-Emails -EmailsMultiline $TxtRem_Emails.Text)
+        # An empty box means "remove everyone", so a box of mistyped addresses must not fall through to that
+        $invalid = @(Split-InputList $TxtRem_Emails.Text | Where-Object { $_ -notmatch $EmailPattern } | Select-Object -Unique)
+        if ($invalid.Count -gt 0) { throw ('These reviewers to remove are not valid email addresses: {0}. Correct them, or clear the box to remove everyone except the replacement.' -f (Join-Preview $invalid)) }
         $replacement = $TxtRem_Replacement.Text.Trim()
         if (-not $replacement) { throw 'Please enter a replacement reviewer email.' }
     } catch { Show-InputError $_.Exception.Message; return }
@@ -1684,7 +1820,7 @@ $BtnClose_Run.Add_Click({
 })
 
 $BtnDelete_Run.Add_Click({
-    $prompt = [System.Windows.MessageBox]::Show('This will DELETE the listed cases. This action is irreversible. Continue?','Confirm Delete','YesNo','Warning')
+    $prompt = [System.Windows.MessageBox]::Show('This will DELETE the listed cases. This action is irreversible. Continue?','Confirm Delete','YesNo','Warning','No')
     if ($prompt -ne 'Yes') { return }
 
     try { $cases = Get-CasesInput $TxtDelete_Cases } catch { Show-InputError $_.Exception.Message; return }
@@ -1706,7 +1842,10 @@ $BtnDelete_Run.Add_Click({
 # Ctrl+Enter runs the current page, F5 refreshes the case list, Ctrl+1 to Ctrl+6 switch pages
 $window.Add_PreviewKeyDown({
     param($s, $e)
-    $ctrl = ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control) -eq [System.Windows.Input.ModifierKeys]::Control
+    # Ctrl without Alt, so AltGr (Ctrl+Alt) still types characters such as @ on non-US keyboards
+    $mods = [System.Windows.Input.Keyboard]::Modifiers
+    $ctrl = (($mods -band [System.Windows.Input.ModifierKeys]::Control) -eq [System.Windows.Input.ModifierKeys]::Control) -and
+            (($mods -band [System.Windows.Input.ModifierKeys]::Alt) -ne [System.Windows.Input.ModifierKeys]::Alt)
     $key = [int]$e.Key
     if ($ctrl -and $key -eq [int][System.Windows.Input.Key]::Enter) {
         $index = $NavList.SelectedIndex
