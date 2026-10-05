@@ -293,8 +293,8 @@ $ThemeXaml = @'
       <Setter Property="BorderBrush" Value="Transparent"/>
     </Style>
     <Style x:Key="HeaderButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
-      <Setter Property="Background" Value="#26FFFFFF"/>
-      <Setter Property="BorderBrush" Value="#40FFFFFF"/>
+      <Setter Property="Background" Value="{DynamicResource HeaderButtonBg}"/>
+      <Setter Property="BorderBrush" Value="{DynamicResource HeaderButtonBorder}"/>
       <Setter Property="Foreground" Value="#FFFFFF"/>
     </Style>
     <Style x:Key="LinkButton" TargetType="Button">
@@ -870,7 +870,7 @@ $mainXaml = @'
       </Viewbox>
       <DockPanel>
         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,16,0">
-          <Border CornerRadius="12" Background="#33000000" Padding="10,5" Margin="0,0,12,0" VerticalAlignment="Center">
+          <Border CornerRadius="12" Background="{DynamicResource HeaderPillBg}" Padding="10,5" Margin="0,0,12,0" VerticalAlignment="Center">
             <StackPanel Orientation="Horizontal">
               <Ellipse x:Name="ConnDot" Width="8" Height="8" Margin="0,0,8,0" VerticalAlignment="Center" Fill="#9CA3AF"/>
               <TextBlock x:Name="TxtConn" Text="Not connected" Foreground="#FFFFFF" VerticalAlignment="Center" MaxWidth="320" TextTrimming="CharacterEllipsis"/>
@@ -1286,6 +1286,7 @@ $Palettes = @{
         ChipFailedBg  = '#FEE4E2'; ChipFailedFg  = '#B42318'
         ChipSkippedBg = '#FEF0C7'; ChipSkippedFg = '#93370D'
         ChipInfoBg    = '#EAECF0'; ChipInfoFg    = '#475467'
+        HeaderButtonBg = '#26FFFFFF'; HeaderButtonBorder = '#40FFFFFF'; HeaderPillBg = '#33000000'
     }
     Dark = @{
         WindowBg = '#17191C'; NavBg = '#1F2226'; StatusBg = '#1F2226'
@@ -1302,6 +1303,7 @@ $Palettes = @{
         ChipFailedBg  = '#55160C'; ChipFailedFg  = '#FDA29B'
         ChipSkippedBg = '#4E1D09'; ChipSkippedFg = '#FEC84B'
         ChipInfoBg    = '#30363D'; ChipInfoFg    = '#CDD5DF'
+        HeaderButtonBg = '#26FFFFFF'; HeaderButtonBorder = '#40FFFFFF'; HeaderPillBg = '#33000000'
     }
     # Magenta-to-blue scheme that goes with the drawn Neon header
     Neon = @{
@@ -1319,6 +1321,7 @@ $Palettes = @{
         ChipFailedBg  = '#4C0F2A'; ChipFailedFg  = '#FF8FA8'
         ChipSkippedBg = '#4A3108'; ChipSkippedFg = '#FFD166'
         ChipInfoBg    = '#2E2350'; ChipInfoFg    = '#D6CCF5'
+        HeaderButtonBg = '#E61B0F2E'; HeaderButtonBorder = '#99FFFFFF'; HeaderPillBg = '#D91B0F2E'
     }
 }
 $script:ThemeMode = 'System'   # System, Light, Dark or Neon
